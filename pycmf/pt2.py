@@ -361,7 +361,7 @@ def _model_space(s, solver):
     return model, model_cis, nelec_tot
 
 
-def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max_dim=5000,
+def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max_dim=10000,
           eri_act=None, vcore=None, conv_tol=1e-9, max_cycle=1000, with_rdm=False, verbose=None) -> QDPT2Result:
     """
     Quasi-degenerate PT2 for the clusters `clusters` (default: all) of a converged `cmf`, with the other
@@ -379,8 +379,8 @@ def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max
     level_shift : float
         Subtracted from the denominators, against intruder states
     max_dim : int
-        Largest determinant space of one cluster in one sector that is diagonalized fully; larger clusters
-        use the iterative solver (partition 'cmf')
+        Largest determinant space of one cluster in one sector (of those that H connects to the model space) that
+        is diagonalized fully; larger clusters use the iterative solver (partition 'cmf')
     with_rdm : bool
         Keep the first-order wavefunction, for `QDPT2Result.make_rdm1s`, `make_rdm12`, `analyze`, ...
 
@@ -408,7 +408,9 @@ def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max
     HP = np.array([hop(c) for c in P.T]).T
     h1st = P.T @ HP + h0*np.eye(nmodel)
 
-    largest = max(cistring.num_strings(n, k)**2 for n in sizes for k in range(n+1))
+    reachable = _reachable_sectors(sizes, model)
+    largest = max(cistring.num_strings(n, na)*cistring.num_strings(n, nb) for n, secs in zip(sizes, reachable)
+                  for na, nb in secs)
     if largest <= max_dim:
         heff, psi1 = _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, with_rdm, log)
     else:
@@ -434,6 +436,23 @@ def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max
     return res
 
 
+def _reachable_sectors(sizes, model) -> list:
+    """
+    For each cluster, the (alpha, beta) sectors that a one- or two-electron operator connects to its sectors in the
+    model space: each cluster gains or loses at most two electrons in all, |d_alpha| + |d_beta| <= 2
+    """
+    out = []
+    for n, size in enumerate(sizes):
+        secs = set()
+        for na, nb in {m[n] for m in model}:
+            for da in range(-2, 3):
+                for db in range(-2 + abs(da), 3 - abs(da)):
+                    if 0 <= na + da <= size and 0 <= nb + db <= size:
+                        secs.add((na + da, nb + db))
+        out.append(sorted(secs))
+    return out
+
+
 def _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, with_psi1, log):
     """Second-order H_eff from H|a> projected on products of cluster eigenstates, and with `with_psi1` the
     first-order corrections of the model functions in the determinant space, (ndet, nmodel)
@@ -443,13 +462,12 @@ def _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, 
     shape = (cistring.num_strings(norb, nelec_tot[0]), cistring.num_strings(norb, nelec_tot[1]))
     HPm = [HP[:, a].reshape(shape) for a in range(HP.shape[1])]
 
-    # cluster eigenstates in every sector, with the model states among them
+    # cluster eigenstates in the sectors that H connects to the model space, with the model states among them
     basis = [{} for n in range(ncl)]
-    for n in range(ncl):
+    for n, secs in enumerate(_reachable_sectors(sizes, model)):
         sn = slice(offsets[n], offsets[n+1])
-        for na in range(sizes[n]+1):
-            for nb in range(sizes[n]+1):
-                basis[n][(na, nb)] = list(_cluster_basis(s['h1_0'][sn, sn], s['h2_0'][sn, sn, sn, sn], sizes[n], (na, nb)))
+        for sec in secs:
+            basis[n][sec] = list(_cluster_basis(s['h1_0'][sn, sn], s['h2_0'][sn, sn, sn, sn], sizes[n], sec))
     model_idx = [[None]*ncl for a in model]
     for n in range(ncl):
         for sec in basis[n]:
