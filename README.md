@@ -10,7 +10,7 @@ A CMF implementation using PySCF
 
 ### Copyright
 
-Copyright (c) 2024, Your name (or your organization/company/team)
+Copyright (c) 2024, Mayhall lab
 
 
 #### Acknowledgements
