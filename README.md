@@ -229,6 +229,20 @@ the π system split into 25 clusters of 4 orbitals, i.e. a 100-orbital active sp
 
 The energy was converged to 1e-6 Eh after 11 iterations. On a node with more cores the J/K builds scale down accordingly.
 
+With perturbation theory on top, all-trans C₄₀H₄₂ (82 atoms, 6-31G, 444 AOs, `weigend`), the π system in 10 clusters
+of 4 orbitals (40 active orbitals, 121 doubly occupied, 283 virtual), pair terms for clusters within 6 Å, 4 cores:
+
+| step | time | energy (Eh) |
+| --- | --- | --- |
+| RHF | 86 s | -1538.304686 |
+| ooCMF to \|g\| < 1e-5 | 50 min | -1538.825585 |
+| `pair_pt2(cutoff=6)`: QDPT2 between clusters, 9 pairs | 6 s | -0.040244 |
+| `nevpt2_mbe(cutoff=6)`: cMF-NEVPT2, 10 clusters + 9 pairs | 6 min | -3.042435 |
+
+The NEVPT2 time is the shared 3-index integrals (26 s), the core-core/virtual-virtual class (37 s), and 11 s per
+cluster and 19 s per pair, which are dominated by matrix multiplications (`O(n_core n_virt² N_aux n_act)`); with the
+cutoff the number of pairs grows linearly with the length of the system.
+
 ### Copyright
 
 Copyright (c) 2024, Your name (or your organization/company/team)
