@@ -1137,6 +1137,13 @@ class CMF(lib.StreamObject):
         from .pt2 import pair_pt2
         return pair_pt2(self, pairs, cutoff, **kwargs)
 
+    def pt2_mbe(self, order=2, cutoff=None, with_rdm=False, **kwargs):
+        """cMF-PT2 energy (and 1RDM) from a many-body expansion over pairs and triples of clusters,
+        see `pycmf.pt2.pt2_mbe`
+        """
+        from .pt2 import pt2_mbe
+        return pt2_mbe(self, order, cutoff, with_rdm=with_rdm, **kwargs)
+
     def nevpt2(self, spin_average=True, **kwargs):
         """SC-NEVPT2 dynamic correlation (doubly occupied and virtual orbitals) of the current state,
         see `pycmf.mrpt.nevpt2`

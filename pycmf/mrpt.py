@@ -377,44 +377,36 @@ def nevpt2_mbe(cmf, order=2, cutoff=None, spin_average=True, max_states=64, verb
     """
     cMF-NEVPT2 from a many-body expansion over the clusters, for active spaces too large for `nevpt2`
 
-    E = E(Sijrs) + sum_I e_I + sum_{I<J} (e_IJ - e_I - e_J)
+    E = E(Sijrs) + sum_I e_I + sum_{I<J} (e_IJ - e_I - e_J) + sum_{I<J<K} (e_IJK - e_IJ - e_IK - e_JK + e_I + e_J + e_K)
 
     where e_S is the NEVPT2 energy without the core-core/virtual-virtual class when only the clusters S are
     correlated and the others are frozen spectators (`nevpt2(clusters=S)`). With all orders this is cMF-NEVPT2;
-    each term only needs the active space of one or two clusters. Use orbital-optimized cMF (`kernel`): for
+    each term only needs the active space of up to `order` clusters. Use orbital-optimized cMF (`kernel`): for
     polyenes with three and four clusters the pair truncation is then within 0.1 mEh of cMF-NEVPT2, while with
     non-optimized orbitals the larger couplings between the active and the other orbitals make it less additive.
+    The three-cluster terms correct the pair truncation for crowded clusters.
 
     Parameters
     ----------
     order : int
-        1 (clusters) or 2 (clusters and pairs)
+        1 (clusters), 2 (clusters and pairs) or 3 (clusters, pairs and triples)
     cutoff : float
-        Skip pairs whose cluster centroids are farther apart (Angstrom)
+        Keep only the sets of clusters whose centroids are all within `cutoff` (Angstrom) of each other
 
     Returns
     -------
     e_corr : float
     increments : dict
-        'sijrs', and (I,) or (I, J) -> increment
+        'sijrs', and (I,), (I, J), (I, J, K) -> increment
     """
+    from .pt2 import cluster_subsets, mbe_increments
     log = logger.new_logger(cmf, verbose)
-    n = len(cmf.clusters)
     cache = _prepare(cmf)
     kw = dict(spin_average=spin_average, max_states=max_states, with_sijrs=False, verbose=verbose, _cache=cache)
+    subsets = cluster_subsets(cmf, order, cutoff, start=1)
+    values = {sub: nevpt2(cmf, clusters=list(sub), **kw)[0] for sub in subsets}
     increments = {'sijrs': _sijrs(cmf, cache)}
-    e1 = {}
-    for i in range(n):
-        e1[i] = nevpt2(cmf, clusters=[i], **kw)[0]
-        increments[(i,)] = e1[i]
-    if order >= 2:
-        pairs = [(i, j) for i in range(n) for j in range(i+1, n)]
-        if cutoff is not None:
-            from .pt2 import cluster_centroids
-            r = cluster_centroids(cmf)
-            pairs = [(i, j) for i, j in pairs if np.linalg.norm(r[i] - r[j]) <= cutoff]
-        for i, j in pairs:
-            increments[(i, j)] = nevpt2(cmf, clusters=[i, j], **kw)[0] - e1[i] - e1[j]
+    increments.update(mbe_increments(values, subsets))
     e_corr = sum(increments.values())
     log.note('cMF-NEVPT2 (many-body expansion, order %d, %d terms): %.12f', order, len(increments), e_corr)
     return e_corr, increments

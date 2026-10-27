@@ -144,7 +144,7 @@ kinetic exchange needs.
 res = cmf.qdpt2([0, 1])             # e.g. the two metals
 res.energies, res.spins             # spin ladder (and mixed-valence states)
 res.heisenberg_j()                  # J of H = -2J S_A.S_B
-e, increments = cmf.pair_pt2(cutoff=6.0)    # pair-additive PT2 for large systems
+e, increments = cmf.pt2_mbe(order=3, cutoff=6.0)    # pairs + triples for large systems
 ```
 
 | test (FCI over the same active orbitals) | QDPT2 | FCI |
@@ -156,6 +156,13 @@ e, increments = cmf.pair_pt2(cutoff=6.0)    # pair-additive PT2 for large system
 
 The couplings are projected on the eigenstates of each cluster, so clusters need to be small enough to diagonalize
 (about 8 orbitals); larger clusters use an iterative solver with the embedded-cluster H0 (`partition='cmf'`).
+
+For many clusters, `cmf.pt2_mbe(order=3, cutoff=...)` expands the QDPT2 energy over pairs and triples of clusters
+(each in the mean field of the rest): E = E_cMF + Σ ΔE_IJ + Σ (ΔE_IJK − ΔE_IJ − ΔE_IK − ΔE_JK). The triples add
+excitations of three clusters at once, e.g. charge transfer between two clusters with the polarization of a third,
+and the non-additivity of the pairs, which matters for crowded clusters. A triple of 4-orbital clusters takes about
+2 s. Octatetraene (STO-3G) in 4 clusters, error with respect to QDPT2 of all clusters: pairs 0.64 mEh, pairs +
+triples 0.023 mEh (with three clusters the expansion is exact). `pair_pt2` is the `order=2` truncation.
 
 ### Dynamic correlation of the environment (cMF-NEVPT2)
 
@@ -186,6 +193,10 @@ orbital-optimized cMF the pair truncation is within 0.1 mEh of the full cMF-NEVP
 | hexatriene, 3 clusters | -0.460688 | 14.3 mEh error | 0.04 mEh error |
 | octatetraene, 4 clusters | -0.612716 | 22.1 mEh error | 0.08 mEh error |
 
+`order=3` adds the three-cluster terms (exact for three clusters). For the π systems above they are small, so the
+pairs usually suffice; a triple of 4-orbital clusters is a 12-orbital NEVPT2, about 7 minutes on 4 cores, nearly all
+in the 3- and 4-RDMs of the reference.
+
 ### RDMs and properties
 
 | method | returns |
@@ -198,6 +209,23 @@ orbital-optimized cMF the pair truncation is within 0.1 mEh of the full cMF-NEVP
 | `analyze()` | cluster occupations, ⟨S_I²⟩, meta-Löwdin charges and spin populations, dipole moment |
 
 For example `mf.dip_moment(mol, cmf.make_rdm1(ao_repr=True))` or `pyscf.tools.molden.from_mo(mol, 'cmf.molden', cmf.mo_coeff)`.
+
+These are mean-field between the clusters. With the second-order coupling between clusters, use the first-order
+wavefunction of QDPT2, Ψ = Ψ₀ + Ψ₁ for a state of the model space (`with_rdm=True`): charge transfer between the
+clusters enters at first order (density between clusters, bond orders), and the spin coupling exactly (a singlet of
+two S = 3/2 clusters has no spin density, unlike the broken-symmetry product state). These are RDMs of a
+wavefunction, so they are N-representable, and spin eigenstates stay spin pure.
+
+```python
+res = cmf.qdpt2([0, 1], with_rdm=True)
+dm_a, dm_b = res.make_rdm1s(state=0, ao_repr=True)      # whole system, AO basis
+dm1, dm2 = res.make_rdm12(state=0)                      # orbitals res.orbs of the selected clusters
+res.analyze(state=0)                                    # charges, spin populations, dipole
+e, inc, dm1, dm1_ao = cmf.pt2_mbe(order=3, cutoff=6.0, with_rdm=True)   # spin-summed 1RDM for large systems
+```
+
+For H₄ in two clusters the largest error of the active 1RDM with respect to FCI drops from 0.11 (cMF) to 0.08.
+The NEVPT2 correction is not included in these densities.
 
 ### Large systems
 

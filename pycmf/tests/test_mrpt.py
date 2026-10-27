@@ -85,7 +85,7 @@ def test_size_consistency():
 def test_many_body_expansion():
     """
     Hexatriene pi system in three clusters, optimized orbitals: the pair-truncated expansion reproduces cMF-NEVPT2,
-    single-cluster terms alone do not
+    single-cluster terms alone do not, and with the triple it is exact
     """
     atoms = [['C', (0.000, 0.000, 0)], ['C', (1.169, 0.675, 0)], ['C', (2.425, -0.050, 0)],
              ['C', (3.594, 0.625, 0)], ['C', (4.850, -0.100, 0)], ['C', (6.019, 0.575, 0)],
@@ -106,6 +106,11 @@ def test_many_body_expansion():
 
     e2_near, inc_near = cmf.nevpt2_mbe(order=2, cutoff=3.0)
     assert (0, 2) not in inc_near and (0, 1) in inc_near
+
+    # with the three-cluster term the expansion is exact
+    e3, inc3 = cmf.nevpt2_mbe(order=3)
+    assert len(inc3) == 1 + 3 + 3 + 1
+    assert abs(e3 - e_exact) < 1e-10
 
 
 @pytest.mark.parametrize('density_fit', [False, True])

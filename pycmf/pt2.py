@@ -17,6 +17,13 @@ partition = 'en' (Epstein-Nesbet): E_k = <k|H|k>, which includes the interaction
     that H_eff stays spin adapted.
 partition = 'cmf': E_k = sum of the cluster energies in H0.
 
+With `with_rdm=True` the first-order wavefunction Psi = sum_a v_a (|a> + |a1>), |a1> = sum_k |k> <k|H|a> / (E_a - E_k),
+of each eigenvector v of H_eff is kept in the determinant space of the selected clusters, and its (normalized) RDMs
+give properties with the second-order coupling between the clusters: charge transfer between clusters at first
+order, and the spin coupling and correlation of the model space. These are expectation values of a wavefunction, so
+the RDMs are N-representable and, for a spin eigenstate, spin pure. `pt2_mbe` expands energies and 1RDMs over pairs
+and triples of clusters for large systems.
+
 The couplings <k|H|a> are obtained from H|a> in the determinant space of the selected clusters (PySCF FCI
 sigma-vector) projected on the eigenstates of each cluster, so this is meant for a few clusters at a time, e.g. a
 pair; `pair_pt2` sums pair contributions for large systems. Clusters too large to diagonalize fully use an iterative
@@ -50,6 +57,11 @@ class QDPT2Result:
         <S^2> of the zeroth-order part of each eigenvector
     e2 : float
         Second-order correction of the reference product state, heff[0,0] - h1st[0,0]
+    clusters, orbs : list, np.ndarray
+        The selected clusters, and their orbitals (columns of `CMF.Cact`) in the order of the CI vectors
+    psi0, psi1 : np.ndarray
+        With `with_rdm`: model functions and their first-order corrections, (nmodel, na, nb) CI vectors in the
+        determinant space of `orbs`
     """
     def __init__(self, heff, h1st, model, s2=None, partition=None):
         self.e_cmf = h1st[0, 0]
@@ -60,6 +72,9 @@ class QDPT2Result:
         self.s2 = s2
         self.e2 = heff[0, 0] - h1st[0, 0]
         self.partition = partition
+        self.clusters = self.orbs = self.norb = self.nelec = None
+        self.psi0 = self.psi1 = None
+        self._embed = None
 
     @property
     def spins(self) -> np.ndarray:
@@ -78,6 +93,72 @@ class QDPT2Result:
         e = np.array([levels[si] for si in s])
         a = np.vstack((np.ones_like(s), -s*(s+1))).T
         return np.linalg.lstsq(a, e, rcond=None)[0][1]
+
+    def wavefunction(self, state=0, order=1) -> np.ndarray:
+        """
+        Normalized CI vector of eigenstate `state` in the determinant space of the selected clusters: its
+        model-space part (order=0) or with the first-order correction (order=1)
+        """
+        if self.psi0 is None:
+            raise RuntimeError('run qdpt2 with with_rdm=True')
+        v = self.vectors[:, state]
+        psi = np.tensordot(v, self.psi0, axes=1)
+        if order >= 1:
+            psi = psi + np.tensordot(v, self.psi1, axes=1)
+        return psi / np.linalg.norm(psi)
+
+    def make_rdm1s(self, state=0, order=1, ao_repr=False) -> tuple:
+        """
+        Alpha and beta 1RDMs of eigenstate `state` (see `wavefunction`) in the orbitals `orbs`, or with `ao_repr`
+        of the whole system in the AO basis: the frozen and doubly occupied orbitals and the other clusters as in
+        `CMF.make_rdm1s`, the selected clusters from the QDPT2 wavefunction
+        """
+        dms = direct_spin1.make_rdm1s(self.wavefunction(state, order), self.norb, self.nelec)
+        if ao_repr:
+            e = self._embed
+            dms = tuple(d_ao + e['C'] @ (d - d_ref) @ e['C'].T for d, d_ao, d_ref in zip(dms, e['dm_ao'], e['dm_ref']))
+        return dms
+
+    def make_rdm1(self, state=0, order=1, ao_repr=False) -> np.ndarray:
+        """Spin-summed 1RDM, see `make_rdm1s`
+        """
+        dm_a, dm_b = self.make_rdm1s(state, order, ao_repr)
+        return dm_a + dm_b
+
+    def make_rdm12(self, state=0, order=1) -> tuple:
+        """Spin-summed 1RDM and spin-free 2RDM (PySCF convention) in the orbitals `orbs`
+        """
+        return direct_spin1.make_rdm12(self.wavefunction(state, order), self.norb, self.nelec)
+
+    def make_rdm12s(self, state=0, order=1) -> tuple:
+        """Spin-resolved 1RDMs and 2RDMs (PySCF convention) in the orbitals `orbs`
+        """
+        return direct_spin1.make_rdm12s(self.wavefunction(state, order), self.norb, self.nelec)
+
+    def spin_square(self, state=0, order=1) -> float:
+        """<S^2> of eigenstate `state`, see `wavefunction`
+        """
+        return fci.spin_square(self.wavefunction(state, order), self.norb, self.nelec)[0]
+
+    def analyze(self, state=0, order=1, verbose=logger.NOTE):
+        """Meta-Lowdin charges and spin populations, and dipole moment, of eigenstate `state` (whole system)
+
+        Returns
+        -------
+        pop_and_charges : tuple
+            See `pyscf.scf.uhf.mulliken_meta`
+        dip : np.ndarray
+            Dipole moment (Debye)
+        """
+        from pyscf import scf
+        mol = self._embed['mol']
+        log = logger.new_logger(mol, verbose)
+        log.note('QDPT2 state %d: E = %.12f  <S^2> = %.6f  (%s)', state, self.energies[state],
+                 self.spin_square(state, order), 'first-order wavefunction' if order else 'model space')
+        dm = self.make_rdm1s(state, order, ao_repr=True)
+        pop_and_charges = scf.uhf.mulliken_meta(mol, dm, verbose=log, s=self._embed['S'])
+        dip = scf.hf.dip_moment(mol, dm[0] + dm[1], verbose=log)
+        return pop_and_charges, dip
 
 
 def _spin_ladder(ci, norb, nelec, raise_):
@@ -248,7 +329,7 @@ def _setup(cmf, clusters, fspaces, eri_act, vcore):
         vref.append(v)
         h1_0[sn, sn] = h1[sn, sn] + v
         h2_0[sn, sn, sn, sn] = h2[sn, sn, sn, sn]
-    return dict(h0=h0, h1=h1, h2=h2, sizes=sizes, offsets=offsets, norb=int(offsets[-1]),
+    return dict(h0=h0, h1=h1, h2=h2, sizes=sizes, offsets=offsets, norb=int(offsets[-1]), orbs=orbs,
                 vref=vref, h1_0=h1_0, h2_0=h2_0, fspaces=[[tuple(s) for s in f] for f in fspaces])
 
 
@@ -281,7 +362,7 @@ def _model_space(s, solver):
 
 
 def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max_dim=5000,
-          eri_act=None, vcore=None, conv_tol=1e-9, max_cycle=1000, verbose=None) -> QDPT2Result:
+          eri_act=None, vcore=None, conv_tol=1e-9, max_cycle=1000, with_rdm=False, verbose=None) -> QDPT2Result:
     """
     Quasi-degenerate PT2 for the clusters `clusters` (default: all) of a converged `cmf`, with the other
     clusters folded into the mean field (see `CMF.get_active_hamiltonian`).
@@ -300,6 +381,8 @@ def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max
     max_dim : int
         Largest determinant space of one cluster in one sector that is diagonalized fully; larger clusters
         use the iterative solver (partition 'cmf')
+    with_rdm : bool
+        Keep the first-order wavefunction, for `QDPT2Result.make_rdm1s`, `make_rdm12`, `analyze`, ...
 
     Returns
     -------
@@ -327,15 +410,23 @@ def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max
 
     largest = max(cistring.num_strings(n, k)**2 for n in sizes for k in range(n+1))
     if largest <= max_dim:
-        heff = _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, log)
+        heff, psi1 = _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, with_rdm, log)
     else:
         if partition != 'cmf':
             log.warn('QDPT2: clusters too large to diagonalize, using partition cmf')
             partition = 'cmf'
-        heff = _heff_iterative(s, model_cis, model, nelec_tot, P, HP, h1st, level_shift, conv_tol, max_cycle, log)
+        heff, psi1 = _heff_iterative(s, model_cis, model, nelec_tot, P, HP, h1st, level_shift, conv_tol, max_cycle,
+                                     log)
 
     res = QDPT2Result(heff, h1st, model, partition=partition)
     res.s2 = np.array([fci.spin_square((P @ v).reshape(shape), norb, nelec_tot)[0] for v in res.vectors.T])
+    res.clusters, res.orbs, res.norb, res.nelec = clusters, s['orbs'], norb, nelec_tot
+    if with_rdm:
+        res.psi0 = P.T.reshape((nmodel,) + shape)
+        res.psi1 = psi1.T.reshape((nmodel,) + shape)
+        idx = np.ix_(s['orbs'], s['orbs'])
+        res._embed = dict(C=cmf.Cact[:, s['orbs']], dm_ao=cmf.make_rdm1s(ao_repr=True),
+                          dm_ref=tuple(d[idx] for d in cmf.make_rdm1s()), mol=cmf.mol, S=cmf.S)
     log.info('QDPT2 (%s) clusters %s: %d orbitals, %d model functions, E(cMF) = %.12f  E2 = %.3e',
              partition, clusters, norb, nmodel, res.e_cmf, res.e2)
     for e, sp in zip(res.energies, res.spins):
@@ -343,8 +434,9 @@ def qdpt2(cmf, clusters=None, fspaces=None, partition='en', level_shift=0.0, max
     return res
 
 
-def _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, log):
-    """Second-order H_eff from H|a> projected on products of cluster eigenstates
+def _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, with_psi1, log):
+    """Second-order H_eff from H|a> projected on products of cluster eigenstates, and with `with_psi1` the
+    first-order corrections of the model functions in the determinant space, (ndet, nmodel)
     """
     sizes, offsets, norb, h0, h2 = s['sizes'], s['offsets'], s['norb'], s['h0'], s['h2']
     ncl = len(sizes)
@@ -403,6 +495,7 @@ def _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, 
 
     nmodel = len(model)
     heff = h1st.copy()
+    psi1 = np.zeros((nmodel,) + shape) if with_psi1 else None
     nsmall = 0
     sectors = [list(basis[n]) for n in range(ncl)]
     for secs in itertools.product(*sectors):
@@ -424,6 +517,7 @@ def _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, 
         if not any(np.any(abs(c) > 1e-14) for c in C):
             continue
         D = zeroth_order(secs)
+        full_shape = D.shape
 
         mask = np.ones(D.shape, bool)
         for a, ms in enumerate(model):
@@ -438,9 +532,18 @@ def _heff_tps(s, model, model_cis, nelec_tot, HP, h1st, partition, level_shift, 
             nsmall += np.count_nonzero(small & (abs(C[a]) > 1e-10))
             W[a] = np.where(small, 0, C[a] / np.where(small, 1, denom))
         heff += .5*(W @ C.T + C @ W.T)
+        if with_psi1:
+            # amplitudes <k|a1> back to determinants: inverse of the projection above
+            t = np.zeros((nmodel,) + full_shape)
+            t[:, mask] = W
+            for n in range(ncl):
+                t = np.tensordot(t, basis[n][secs[n]][1], axes=([1], [1]))
+            t = t.reshape([nmodel] + [d for da, db in zip(dims_a, dims_b) for d in (da, db)])
+            t = t.transpose([0] + [1+2*n for n in range(ncl)] + [2+2*n for n in range(ncl)])
+            psi1[:, addr_a[:, None], addr_b] += sign * t.reshape(nmodel, len(addr_a), len(addr_b))
     if nsmall:
         log.warn('QDPT2: %d couplings to states degenerate with the model space were skipped', nsmall)
-    return heff
+    return heff, (None if psi1 is None else psi1.reshape(nmodel, -1).T)
 
 
 def _heff_iterative(s, model_cis, model, nelec_tot, P, HP, h1st, level_shift, conv_tol, max_cycle, log):
@@ -468,7 +571,7 @@ def _heff_iterative(s, model_cis, model, nelec_tot, P, HP, h1st, level_shift, co
             log.warn('QDPT2: first-order equation %d not converged', a)
         psi1[:, a] = project(x)
     v12 = rhs.T @ psi1
-    return h1st + .5*(v12 + v12.T)
+    return h1st + .5*(v12 + v12.T), psi1
 
 
 def cluster_centroids(cmf) -> np.ndarray:
@@ -482,9 +585,109 @@ def cluster_centroids(cmf) -> np.ndarray:
     return np.array(out) * lib.param.BOHR
 
 
+def cluster_subsets(cmf, order, cutoff=None, start=2) -> list:
+    """
+    Sets of `start` to `order` clusters (tuples, by increasing size) whose cluster centroids are all within
+    `cutoff` (Angstrom) of each other; every subset of a returned set of at least `start` clusters is returned too
+    """
+    n = len(cmf.clusters)
+    if cutoff is None:
+        close = lambda sub: True
+    else:
+        r = cluster_centroids(cmf)
+        close = lambda sub: all(np.linalg.norm(r[i] - r[j]) <= cutoff for i, j in itertools.combinations(sub, 2))
+    return [sub for k in range(start, order+1) for sub in itertools.combinations(range(n), k) if close(sub)]
+
+
+def mbe_increments(values, subsets) -> dict:
+    """
+    Increments of a many-body expansion over clusters: inc[S] = values[S] - sum of inc[T] over the proper subsets T
+    of S in `subsets`, so that the sum of all increments up to |S| clusters reproduces values[S]
+    """
+    inc = {}
+    for sub in sorted((tuple(sorted(x)) for x in subsets), key=len):
+        x = values[sub]
+        for t, v in inc.items():
+            if len(t) < len(sub) and set(t) <= set(sub):
+                x = x - v
+        inc[sub] = x
+    return inc
+
+
+def pt2_mbe(cmf, order=2, cutoff=None, subsets=None, with_rdm=False, **kwargs):
+    """
+    cMF-PT2 from a many-body expansion over the clusters, for systems with many clusters:
+
+        E = E_cMF + sum_{I<J} dE_IJ + sum_{I<J<K} (dE_IJK - dE_IJ - dE_IK - dE_JK) + ...
+
+    where dE_S is the lowest QDPT2 energy of the clusters S, in the mean field of the others, minus E_cMF. Single
+    clusters give no correction, as they are eigenstates of their embedded Hamiltonians. The pair terms contain the
+    second-order correlation and the charge transfer between two clusters; the three-cluster terms add the
+    excitations that involve three clusters at once (e.g. charge transfer between two clusters with the
+    polarization of a third) and the non-additivity of the pairs, which matter for crowded clusters.
+
+    With `with_rdm`, the spin-summed 1RDM of the first-order wavefunction is expanded in the same way.
+
+    For open-shell clusters each subset is in its lowest spin state, so for more than two spin-coupled clusters
+    the increments are not those of one global spin state; use `qdpt2` on all of them, or the pair couplings
+    (`QDPT2Result.heisenberg_j`) in a spin Hamiltonian.
+
+    Parameters
+    ----------
+    order : int
+        Largest number of clusters in a term (2: pairs, 3: pairs and triples)
+    cutoff : float
+        Keep only the sets of clusters whose centroids are all within `cutoff` (Angstrom) of each other
+    subsets : list
+        Explicit sets of clusters instead of `order` and `cutoff` (all subsets of two or more clusters of a set
+        should be included)
+    with_rdm : bool
+        Also return the 1RDM
+    kwargs
+        Passed to `qdpt2`
+
+    Returns
+    -------
+    e_tot : float
+    increments : dict
+        Set of clusters (tuple) -> energy increment
+    dm1, dm1_ao : np.ndarray
+        With `with_rdm`: spin-summed 1RDM of the active orbitals, and of the whole system in the AO basis
+    """
+    log = logger.new_logger(cmf, kwargs.get('verbose'))
+    if subsets is None:
+        subsets = cluster_subsets(cmf, order, cutoff)
+    subsets = [tuple(sorted(x)) for x in subsets]
+    eri_act = cmf.get_active_eris()
+    vcore = cmf.get_core_veff()
+    nact = cmf.Cact.shape[1]
+    dm_ref = cmf.make_rdm1()
+    e_ref = cmf.e_tot
+    de, ddm = {}, {}
+    for sub in subsets:
+        res = qdpt2(cmf, list(sub), eri_act=eri_act, vcore=vcore, with_rdm=with_rdm, **kwargs)
+        e_ref = res.e_cmf
+        de[sub] = res.energies[0] - res.e_cmf
+        if with_rdm:
+            idx = np.ix_(res.orbs, res.orbs)
+            d = np.zeros((nact, nact))
+            d[idx] = res.make_rdm1() - dm_ref[idx]
+            ddm[sub] = d
+        log.info('clusters %s  dE = %.3e', sub, de[sub])
+    increments = mbe_increments(de, subsets)
+    e_tot = e_ref + sum(increments.values())
+    log.note('cMF-PT2 (many-body expansion, %d terms): E = %.12f', len(increments), e_tot)
+    if not with_rdm:
+        return e_tot, increments
+    dm1 = dm_ref + sum(mbe_increments(ddm, subsets).values())
+    dm1_ao = cmf.make_rdm1(ao_repr=True) + cmf.Cact @ (dm1 - dm_ref) @ cmf.Cact.T
+    return e_tot, increments, dm1, dm1_ao
+
+
 def pair_pt2(cmf, pairs=None, cutoff=None, **kwargs) -> (float, dict):
     """
-    Pair-additive cMF-PT2: E = E_cMF + sum over cluster pairs of (lowest QDPT2 energy of the pair - E_cMF)
+    Pair-additive cMF-PT2: E = E_cMF + sum over cluster pairs of (lowest QDPT2 energy of the pair - E_cMF), the
+    second-order truncation of `pt2_mbe`
 
     Each pair is treated with `qdpt2` in the mean field of the other clusters, so the pair contribution includes
     the second-order correlation within the pair and, for open-shell clusters, the stabilization of the lowest spin
@@ -506,20 +709,9 @@ def pair_pt2(cmf, pairs=None, cutoff=None, **kwargs) -> (float, dict):
     increments : dict
         (I, J) -> energy lowering of the pair
     """
-    log = logger.new_logger(cmf, kwargs.get('verbose'))
-    n = len(cmf.clusters)
     if pairs is None:
-        pairs = [(i, j) for i in range(n) for j in range(i+1, n)]
-    if cutoff is not None:
+        pairs = cluster_subsets(cmf, 2, cutoff)
+    elif cutoff is not None:
         r = cluster_centroids(cmf)
         pairs = [(i, j) for i, j in pairs if np.linalg.norm(r[i] - r[j]) <= cutoff]
-    eri_act = cmf.get_active_eris()
-    vcore = cmf.get_core_veff()
-    increments = {}
-    for i, j in pairs:
-        res = qdpt2(cmf, [i, j], eri_act=eri_act, vcore=vcore, **kwargs)
-        increments[(i, j)] = res.energies[0] - res.e_cmf
-        log.info('pair (%d, %d)  dE = %.3e', i, j, increments[(i, j)])
-    e_tot = cmf.e_tot + sum(increments.values())
-    log.note('pair cMF-PT2: E = %.12f  (%d pairs)', e_tot, len(increments))
-    return e_tot, increments
+    return pt2_mbe(cmf, subsets=pairs, **kwargs)
