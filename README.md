@@ -169,10 +169,12 @@ So the two corrections do not overlap:
 
 For open-shell clusters the reference is the RO-cMF Ms ensemble (`spin_average=True`, default). The energy
 expressions are those of `pyscf.mrpt.nevpt2`: with one cluster, cMF-NEVPT2 is SC-NEVPT2 of CASCI (tested), and two
-separated molecules give twice the energy of one (tested). Frozen orbitals (`set_Cfrz`) are not correlated, and with
-density fitting the core-core/virtual-virtual class is computed from the 3-index integrals, so (ia|jb) is never stored
-(it would be (n_core n_virt)^2, about 290 GB for the Fe₂ complex). The active-space RDMs of the cMF state are built in
-the determinant space of the active orbitals, so `nevpt2` needs a moderate active space (about 10-12 orbitals).
+separated molecules give twice the energy of one (tested). Frozen orbitals (`set_Cfrz`) are not correlated. With
+density fitting all integrals come from two 3-index tensors, (L|pt) for active t and (ia|L) for core i and virtual a,
+`8 N_aux (n_MO n_act + n_core n_virt)` bytes (1 GB for C₄₀H₄₂/6-31G), built once and shared by all sub-problems of
+`nevpt2_mbe`; (ia|jb) and (pt|ia) are only formed in blocks (stored, (ia|jb) would be (n_core n_virt)², about 290 GB
+for the Fe₂ complex). The active-space RDMs of the cMF state are built in the determinant space of the active
+orbitals, so `nevpt2` needs a moderate active space (about 10-12 orbitals).
 
 For larger active spaces, `cmf.nevpt2_mbe(order=2, cutoff=...)` expands cMF-NEVPT2 over the clusters: the
 core-core/virtual-virtual class once, plus the NEVPT2 increment of each cluster and each pair of clusters, with the
