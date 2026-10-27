@@ -16,7 +16,9 @@ cMF energy is a few Eh above the ROHF). --guess spade starts from ROHF orbitals 
     python cr2_pantazis_ao.py --steps qdpt2,pdft --bridges          # reuses rohf.chk and cmf_orbitals.npy
 
 Each step reads the checkpoints of the previous ones from the working directory (rohf.chk, cmf_orbitals.npy), so
-steps can run as separate jobs; results are appended to results.json. Set OMP_NUM_THREADS to the cores of the node.
+steps can run as separate jobs; results are appended to results.json. The orbitals are saved after every ooCMF
+iteration, so a job stopped by the walltime resumes where it was when the cmf step is run again. Set OMP_NUM_THREADS
+to the cores of the node.
 
 Notes
 * QDPT2 and PT1-PDFT work in the determinant space of the clusters treated together. The Cr-Cr pair (20 orbitals,
@@ -100,8 +102,8 @@ if 'cmf' in steps:
     if os.path.exists('cmf_orbitals.npy'):
         cmf.set_mo_coeffs(np.load('cmf_orbitals.npy'))
         log('restarting the orbital optimization from cmf_orbitals.npy')
+    cmf.chkfile = 'cmf_orbitals.npy'           # orbitals saved after every iteration: rerun the step to resume
     cmf.kernel()
-    np.save('cmf_orbitals.npy', cmf.get_mo_coeffs())
 elif os.path.exists('cmf_orbitals.npy'):
     cmf.set_mo_coeffs(np.load('cmf_orbitals.npy'))
     cmf.cmf_ci()

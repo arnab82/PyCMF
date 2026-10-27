@@ -59,6 +59,7 @@ class CMF(lib.StreamObject):
         self.max_cycle       = 200
         self.max_stepsize    = 0.5      # max norm of an orbital rotation step
         self.lbfgs_memory    = 20
+        self.chkfile         = None     # .npy file for the [doc, act, vir] orbitals after every iteration (restarts)
         self.zero_intra_rots = True     # rotations within a cluster are redundant for FCI
 
         # CMF-CI (cluster states at fixed orbitals)
@@ -910,6 +911,8 @@ class CMF(lib.StreamObject):
 
             de = e_new - e
             x, e, g = x + s, e_new, g_new
+            if self.chkfile:
+                np.save(self.chkfile, C0 @ scipy.linalg.expm(unpack(x)))
             log.info('ooCMF iter %3d  E = %.12f  dE = %.3e  |g| = %.3e  |step| = %.3e',
                      it, e, de, np.linalg.norm(g), np.linalg.norm(s))
             self.converged = np.linalg.norm(g) < self.conv_tol_grad and abs(de) < self.conv_tol
@@ -923,6 +926,8 @@ class CMF(lib.StreamObject):
                 log.note('  state %d  weight %.3f  E = %.12f  fspace = %s', k, w, ek, self.sa_states[k]['fspace'])
         self.e_tot = e
         self.mo_coeff = np.hstack((self.Cfrz, self.get_mo_coeffs()))
+        if self.chkfile:
+            np.save(self.chkfile, self.get_mo_coeffs())
         return e
 
     def make_rdm1s(self, state=None, ncas=None, nelecas=None, root=0, spin_average=False, ao_repr=False):
