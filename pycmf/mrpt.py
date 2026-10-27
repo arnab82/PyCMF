@@ -8,8 +8,9 @@ orbitals, is left to `qdpt2`, which uses the same cluster Hamiltonians. The pert
 (excitations involving the doubly occupied and virtual orbitals) and the energy expressions are those of
 `pyscf.mrpt.nevpt2`, with the active-space RDMs of the cMF product state. These are built in the determinant space of
 the active orbitals, so the active space has to be moderate (about 14 orbitals); the doubly occupied and virtual
-spaces can be large: frozen orbitals (`set_Cfrz`) are not correlated, and with density fitting the core-core/virtual-
-virtual class is evaluated from the 3-index integrals without storing (ia|jb).
+spaces can be large: frozen orbitals (`set_Cfrz`) are not correlated. With density fitting, the integrals are sliced
+from three-index ones, (L|p t) with t active and (L|i a), built once and shared by all sub-problems of `nevpt2_mbe`;
+(ia|jb) and (pt|ia) are formed in blocks and never stored.
 """
 import itertools
 import numpy as np
@@ -67,17 +68,15 @@ def _reference_rdms(cmf, clusters, h2_0, spin_average, max_states, log):
     return dms, len(members)
 
 
-def _sijrs(cmf, moc, mov, e_core, e_vir):
+def _sijrs(cmf, cache):
     """Core-core -> virtual-virtual class, sum_ijab (ia|jb) [2 (ia|jb) - (ib|ja)] / (e_i + e_j - e_a - e_b)
     """
+    moc, mov, e_core, e_vir = cache['moc'], cache['mov'], cache['e_core'], cache['e_vir']
     ncore, nvir = moc.shape[1], mov.shape[1]
     if ncore == 0 or nvir == 0:
         return 0.0
-    if hasattr(getattr(cmf.mf, 'with_df', None), 'loop'):
-        lov = []
-        for eri1 in cmf.mf.with_df.loop():
-            lov.append(lib.einsum('Lpq,pi,qa->Lia', lib.unpack_tril(eri1), moc, mov))
-        lov = np.concatenate(lov)
+    if 'Lcv' in cache:
+        lov = cache['Lcv']
         ovov = lambda i: lib.einsum('La,Ljb->jab', lov[:, i], lov)
     else:
         g = cmf.ao2mo((moc, mov, moc, mov))
@@ -90,17 +89,35 @@ def _sijrs(cmf, moc, mov, e_core, e_vir):
     return e
 
 
-def _veff(cmf, clusters):
-    """J - K/2 (AO) of the frozen and doubly occupied orbitals and of the clusters `clusters`, built from
-    orbitals and occupations so that density-fitted K is cheap
+def _veff(cmf, clusters, core=True):
+    """J - K/2 (AO) of the clusters `clusters` and, with `core`, of the frozen and doubly occupied orbitals, built
+    from orbitals and occupations so that density-fitted K is cheap
     """
-    orbs = [np.hstack((cmf.Cfrz, cmf.Cdoc))]
-    occs = [np.full(orbs[0].shape[1], 2.0)]
+    orbs, occs = [], []
+    if core:
+        orbs.append(np.hstack((cmf.Cfrz, cmf.Cdoc)))
+        occs.append(np.full(orbs[0].shape[1], 2.0))
     for i in clusters:
         c, n = cmf._cluster_natural_orbitals(i, cmf.cluster_1rdm[i])
         orbs.append(c)
         occs.append(n)
     return cmf._get_veff([np.hstack(orbs)], [np.concatenate(occs)])[0]
+
+
+def _pacv(eris, p, c=slice(None), v=slice(None)):
+    """(p t|i a) for the orbitals p, all active t, core i in c and virtual a in v, from the stored integrals or
+    from the three-index ones
+    """
+    if 'pacv' in eris:
+        return eris['pacv'][p, :, c, v]
+    return lib.einsum('Lpt,Lia->ptia', eris['Lpa'][:, p], eris['Lcv'][:, c, v])
+
+
+def _block_size(mc, n_per_index):
+    """Number of indices of a loop whose arrays have n_per_index elements per index, to fit in a quarter of the
+    memory
+    """
+    return max(1, int(mc.max_memory*.25e6/8/max(1, n_per_index)))
 
 
 # Sijr, Srsi and Sir of pyscf.mrpt.nevpt2 (Apache License 2.0), with the contractions of three tensors done in
@@ -110,23 +127,28 @@ def _veff(cmf, clusters):
 def _sijr(mc, dms, eris):
     ncore, ncas = mc.ncore, mc.ncas
     nocc = ncore + ncas
+    nvirt = mc.mo_coeff.shape[1] - nocc
     dm1, dm2 = dms['1'], dms['2']
     h1e = eris['h1eff'][ncore:nocc, ncore:nocc]
     h2e = eris['ppaa'][ncore:nocc, ncore:nocc].transpose(0, 2, 1, 3)
-    h2e_v = eris['pacv'][:ncore].transpose(3, 1, 2, 0)
     hdm1 = _nevpt2.make_hdm1(dm1)
     a3 = _nevpt2.make_a3(h1e, h2e, dm1, dm2, hdm1)
     ci_diag = np.diag_indices(ncore)
     ci_triu = np.triu_indices(ncore)
 
-    def pair_sum(d):
+    def pair_sum(h2e_v, d):
         x = np.einsum('raji,pa->rpji', h2e_v, d, optimize=True)
         out = 2.0*np.einsum('rpji,rpji->rji', h2e_v, x) - np.einsum('rpji,rpij->rji', h2e_v, x)
         out += out.transpose(0, 2, 1)
         out[:, ci_diag[0], ci_diag[1]] *= 0.5
         return out[:, ci_triu[0], ci_triu[1]]
-    diff = mc.mo_energy[nocc:, None, None] - mc.mo_energy[None, :ncore, None] - mc.mo_energy[None, None, :ncore]
-    return _nevpt2._norm_to_energy(pair_sum(hdm1), pair_sum(a3), diff[:, ci_triu[0], ci_triu[1]])[1]
+    e = 0.0
+    for r0, r1 in lib.prange(0, nvirt, _block_size(mc, 3*ncore*ncore*ncas)):
+        h2e_v = _pacv(eris, slice(0, ncore), v=slice(r0, r1)).transpose(3, 1, 2, 0)
+        e_r = mc.mo_energy[nocc+r0:nocc+r1]
+        diff = e_r[:, None, None] - mc.mo_energy[None, :ncore, None] - mc.mo_energy[None, None, :ncore]
+        e += _nevpt2._norm_to_energy(pair_sum(h2e_v, hdm1), pair_sum(h2e_v, a3), diff[:, ci_triu[0], ci_triu[1]])[1]
+    return e
 
 
 def _srsi(mc, dms, eris):
@@ -136,19 +158,22 @@ def _srsi(mc, dms, eris):
     dm1, dm2 = dms['1'], dms['2']
     h1e = eris['h1eff'][ncore:nocc, ncore:nocc]
     h2e = eris['ppaa'][ncore:nocc, ncore:nocc].transpose(0, 2, 1, 3)
-    h2e_v = eris['pacv'][nocc:].transpose(3, 0, 2, 1)
     k27 = _nevpt2.make_k27(h1e, h2e, dm1, dm2)
     vi_diag = np.diag_indices(nvirt)
     vi_triu = np.triu_indices(nvirt)
 
-    def pair_sum(d):
+    def pair_sum(h2e_v, d):
         x = np.einsum('rsia,pa->rsip', h2e_v, d, optimize=True)
         out = 2.0*np.einsum('rsip,rsip->rsi', h2e_v, x) - np.einsum('rsip,srip->rsi', h2e_v, x)
         out += out.transpose(1, 0, 2)
         out[vi_diag] *= 0.5
         return out[vi_triu]
-    diff = mc.mo_energy[nocc:, None, None] + mc.mo_energy[None, nocc:, None] - mc.mo_energy[None, None, :ncore]
-    return _nevpt2._norm_to_energy(pair_sum(dm1), pair_sum(k27), diff[vi_triu])[1]
+    e = 0.0
+    for i0, i1 in lib.prange(0, ncore, _block_size(mc, 3*nvirt*nvirt*ncas)):
+        h2e_v = _pacv(eris, slice(nocc, None), c=slice(i0, i1)).transpose(3, 0, 2, 1)
+        diff = mc.mo_energy[nocc:, None, None] + mc.mo_energy[None, nocc:, None] - mc.mo_energy[None, None, i0:i1]
+        e += _nevpt2._norm_to_energy(pair_sum(h2e_v, dm1), pair_sum(h2e_v, k27), diff[vi_triu])[1]
+    return e
 
 
 def _sir(mc, dms, eris):
@@ -181,8 +206,12 @@ def _sir(mc, dms, eris):
     return _nevpt2._norm_to_energy(norm, h, -diff)[1]
 
 
-def _semicanonical(cmf):
-    """Doubly occupied and virtual orbitals that diagonalize the Fock matrix of the cMF density, and their energies
+def _prepare(cmf):
+    """
+    What all cMF-NEVPT2 sub-problems share: the doubly occupied and virtual orbitals that diagonalize the Fock
+    matrix of the cMF density, their energies and, with density fitting, the three-index integrals (L|p t) for p in
+    (core, all active, virtual) and active t, and (L|i a) for core i and virtual a, from which the integrals of
+    every sub-problem are sliced
     """
     mf = cmf.mf
     fock = mf.get_hcore() + _veff(cmf, range(len(cmf.clusters)))
@@ -190,11 +219,47 @@ def _semicanonical(cmf):
     moc = cmf.Cdoc @ u
     e_vir, u = np.linalg.eigh(cmf.Cvir.T @ fock @ cmf.Cvir)
     mov = cmf.Cvir @ u
-    return fock, moc, e_core, mov, e_vir
+    cache = {'fock': fock, 'moc': moc, 'e_core': e_core, 'mov': mov, 'e_vir': e_vir}
+    with_df = getattr(mf, 'with_df', None)
+    if hasattr(with_df, 'loop'):
+        Cact = cmf.Cact
+        mo = np.hstack((moc, Cact, mov))
+        nao = mo.shape[0]
+        blksize = max(4, int(mf.max_memory*.2e6/8/nao**2))
+        lpa, lcv = [], []
+        for eri1 in with_df.loop(blksize):
+            l = lib.unpack_tril(eri1)
+            lpa.append(lib.einsum('Lmt,mp->Lpt', lib.einsum('Lmn,nt->Lmt', l, Cact), mo))
+            lcv.append(lib.einsum('Lmi,ma->Lia', lib.einsum('Lmn,ni->Lmi', l, moc), mov))
+        cache['Lpa'] = np.concatenate(lpa)
+        cache['Lcv'] = np.concatenate(lcv)
+    return cache
+
+
+def _df_eris(lpa, lcv, ncore, ncas):
+    """
+    The blocks of ppaa (pq|tu) and papa (pt|qu) that the NEVPT2 classes use, from (L|p t) and (L|i a); the
+    core-core and virtual-virtual blocks of ppaa are not needed and left zero. The (pt|ia) are formed in blocks
+    by the classes that need them, `_pacv`
+    """
+    naux, nmo = lpa.shape[:2]
+    nocc = ncore + ncas
+    nvir = nmo - nocc
+    lpa2 = lpa.reshape(naux, -1)
+    laa = np.ascontiguousarray(lpa[:, ncore:nocc]).reshape(naux, -1)
+    ppaa = np.zeros((nmo, nmo, ncas, ncas))
+    x = lib.dot(lpa2.T, laa).reshape(nmo, ncas, ncas, ncas)
+    ppaa[:, ncore:nocc] = x
+    ppaa[ncore:nocc] = x.transpose(1, 0, 2, 3)
+    x = lib.dot(lcv.reshape(naux, -1).T, laa).reshape(ncore, nvir, ncas, ncas)
+    ppaa[:ncore, nocc:] = x
+    ppaa[nocc:, :ncore] = x.transpose(1, 0, 2, 3)
+    papa = lib.dot(lpa2.T, lpa2).reshape(nmo, ncas, nmo, ncas)
+    return {'ppaa': ppaa, 'papa': papa, 'Lpa': lpa, 'Lcv': lcv}
 
 
 def nevpt2(cmf, spin_average=True, max_states=64, clusters=None, with_sijrs=True, verbose=None,
-           _semi=None) -> (float, dict):
+           _cache=None) -> (float, dict):
     """
     SC-NEVPT2 correlation energy of the current cMF state (for `state_average_`, of the selected state)
 
@@ -221,15 +286,16 @@ def nevpt2(cmf, spin_average=True, max_states=64, clusters=None, with_sijrs=True
     if clusters is None:
         clusters = list(range(len(cmf.clusters)))
     clusters = list(clusters)
-    spectators = [j for j in range(len(cmf.clusters)) if j not in clusters]
     orbs = np.asarray(sum([list(cmf.clusters[i]) for i in clusters], []), dtype=int)
     Cact = cmf.Cact[:, orbs]
     ncore, ncas = cmf.Cdoc.shape[1], Cact.shape[1]
     nelecas = (sum(cmf.fspace[i][0] for i in clusters), sum(cmf.fspace[i][1] for i in clusters))
 
-    fock, moc, e_core, mov, e_vir = _semicanonical(cmf) if _semi is None else _semi
+    cache = _prepare(cmf) if _cache is None else _cache
+    fock, moc, e_core, mov, e_vir = (cache[k] for k in ('fock', 'moc', 'e_core', 'mov', 'e_vir'))
     mo = np.hstack((moc, Cact, mov))
     nocc = ncore + ncas
+    nvir = mov.shape[1]
 
     mc = mcscf.CASCI(mf, ncas, nelecas)
     mc.ncore = ncore                    # frozen orbitals and spectator clusters are not part of the NEVPT2 core
@@ -241,10 +307,14 @@ def nevpt2(cmf, spin_average=True, max_states=64, clusters=None, with_sijrs=True
     nev.mo_energy = np.concatenate((e_core, np.diag(Cact.T @ fock @ Cact), e_vir))
 
     # integrals, with the frozen and doubly occupied orbitals and the spectator clusters in h1eff
-    eris = {'ppaa': cmf.ao2mo((mo, mo, Cact, Cact)),
-            'papa': cmf.ao2mo((mo, Cact, mo, Cact)),
-            'pacv': cmf.ao2mo((mo, Cact, moc, mov))}
-    eris['h1eff'] = mo.T @ (mf.get_hcore() + _veff(cmf, spectators)) @ mo
+    if 'Lpa' in cache:
+        idx = np.concatenate((np.arange(ncore), ncore + orbs, ncore + cmf.Cact.shape[1] + np.arange(nvir)))
+        eris = _df_eris(cache['Lpa'][:, idx[:, None], orbs], cache['Lcv'], ncore, ncas)
+    else:
+        eris = {'ppaa': cmf.ao2mo((mo, mo, Cact, Cact)),
+                'papa': cmf.ao2mo((mo, Cact, mo, Cact)),
+                'pacv': cmf.ao2mo((mo, Cact, moc, mov))}
+    eris['h1eff'] = mo.T @ (fock - _veff(cmf, clusters, core=False)) @ mo
 
     # active part of H0: the embedded cluster Hamiltonians
     h1 = eris['h1eff'][ncore:nocc, ncore:nocc]
@@ -271,7 +341,7 @@ def nevpt2(cmf, spin_average=True, max_states=64, clusters=None, with_sijrs=True
     parts['Sr'] = _nevpt2.Sr(nev, None, dms, eris)[1]
     parts['Si'] = _nevpt2.Si(nev, None, dms, eris)[1]
     if with_sijrs:
-        parts['Sijrs'] = _sijrs(cmf, moc, mov, e_core, e_vir)
+        parts['Sijrs'] = _sijrs(cmf, cache)
     parts['Sijr'] = _sijr(nev, dms, eris)
     parts['Srsi'] = _srsi(nev, dms, eris)
     parts['Srs'] = _nevpt2.Srs(nev, dms, eris)[1]
@@ -313,10 +383,9 @@ def nevpt2_mbe(cmf, order=2, cutoff=None, spin_average=True, max_states=64, verb
     """
     log = logger.new_logger(cmf, verbose)
     n = len(cmf.clusters)
-    semi = _semicanonical(cmf)
-    fock, moc, e_core, mov, e_vir = semi
-    kw = dict(spin_average=spin_average, max_states=max_states, with_sijrs=False, verbose=verbose, _semi=semi)
-    increments = {'sijrs': _sijrs(cmf, moc, mov, e_core, e_vir)}
+    cache = _prepare(cmf)
+    kw = dict(spin_average=spin_average, max_states=max_states, with_sijrs=False, verbose=verbose, _cache=cache)
+    increments = {'sijrs': _sijrs(cmf, cache)}
     e1 = {}
     for i in range(n):
         e1[i] = nevpt2(cmf, clusters=[i], **kw)[0]
