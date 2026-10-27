@@ -277,10 +277,40 @@ class CMF(lib.StreamObject):
         vcore : np.ndarray
         vclusters : list
         """
-        dms = [self.get_core_dm()] + self.get_cluster_dms(rdm1s)
-        vj, vk = self.mf.get_jk(self.mol, np.asarray(dms), hermi=1)
-        veff = vj - .5*vk
+        if rdm1s is None:
+            rdm1s = self.cluster_1rdm
+        orbs = [np.hstack((self.Cfrz, self.Cdoc))]
+        occs = [np.full(orbs[0].shape[1], 2.0)]
+        for i, d in enumerate(rdm1s):
+            c, n = self._cluster_natural_orbitals(i, d)
+            orbs.append(c)
+            occs.append(n)
+        veff = self._get_veff(orbs, occs)
         return veff[0], list(veff[1:])
+
+    def _cluster_natural_orbitals(self, i, rdm1) -> (np.ndarray, np.ndarray):
+        """AO coefficients and occupations of the natural orbitals of cluster `i`
+        """
+        n, u = np.linalg.eigh(rdm1)
+        return self.Cact[:, self.clusters[i]] @ u, np.maximum(n, 0)
+
+    def _get_veff(self, orbs:list[np.ndarray], occs:list[np.ndarray]) -> np.ndarray:
+        """
+        J - K/2 for the AO densities C diag(n) C^T of each (C, n) in zip(orbs, occs)
+
+        The orbitals are attached to the densities, so that density-fitted K is built from
+        them at a cost proportional to the number of orbitals instead of the number of AOs
+        """
+        nmo = max(c.shape[1] for c in orbs)
+        mo_coeff = np.zeros((len(orbs), self.nbas, nmo))
+        mo_occ = np.zeros((len(orbs), nmo))
+        for i, (c, n) in enumerate(zip(orbs, occs)):
+            mo_coeff[i, :, :c.shape[1]] = c
+            mo_occ[i, :c.shape[1]] = n
+        dms = lib.einsum('xpi,xi,xqi->xpq', mo_coeff, mo_occ, mo_coeff)
+        dms = lib.tag_array(dms, mo_coeff=mo_coeff, mo_occ=mo_occ)
+        vj, vk = self.mf.get_jk(self.mol, dms, hermi=1)
+        return vj - .5*vk
 
     def ao2mo(self, mo_coeffs) -> np.ndarray:
         """
@@ -289,7 +319,7 @@ class CMF(lib.StreamObject):
         """
         mf = self.mf
         shape = [c.shape[1] for c in mo_coeffs]
-        if getattr(mf, 'with_df', None) is not None:
+        if hasattr(getattr(mf, 'with_df', None), 'ao2mo'):
             eri = mf.with_df.ao2mo(mo_coeffs, compact=False)
         elif getattr(mf, '_eri', None) is not None:
             eri = ao2mo.incore.general(mf._eri, mo_coeffs, compact=False)
@@ -312,12 +342,41 @@ class CMF(lib.StreamObject):
     def get_cluster_eris_ao(self) -> list[np.ndarray]:
         """(mu u|v w) with the first index in the AO basis and the others in the orbitals of each cluster
         """
+        if hasattr(getattr(self.mf, 'with_df', None), 'loop'):
+            # density fitting: all clusters in one pass over the 3-index integrals
+            eris_ao = [np.zeros((self.nbas,) + (len(ci),)*3) for ci in self.clusters]
+            for eri1 in self.mf.with_df.loop():
+                Lpa = lib.einsum('Lpq,qa->Lpa', lib.unpack_tril(eri1), self.Cact)
+                for i, ci in enumerate(self.clusters):
+                    Lvw = lib.einsum('pv,Lpw->Lvw', self.Cact[:, ci], Lpa[:, :, ci])
+                    eris_ao[i] += lib.einsum('Lpu,Lvw->puvw', Lpa[:, :, ci], Lvw)
+            return eris_ao
         eye = np.eye(self.nbas)
         eris_ao = []
         for ci in self.clusters:
             Ci = self.Cact[:, ci]
             eris_ao.append(self.ao2mo((eye, Ci, Ci, Ci)))
         return eris_ao
+
+    def get_active_eris(self) -> np.ndarray:
+        """(pq|rs) for all active orbitals
+        """
+        return self.ao2mo((self.Cact,) * 4)
+
+    def _get_active_veff(self, i, rdm1, eri_act) -> np.ndarray:
+        """J - K/2 of the density `rdm1` of cluster `i`, in the basis of all active orbitals
+        """
+        ci = self.clusters[i]
+        vj = np.einsum('pqvw,vw->pq', eri_act[:, :, ci, :][:, :, :, ci], rdm1)
+        vk = np.einsum('pwvq,vw->pq', eri_act[:, ci, :, :][:, :, ci, :], rdm1)
+        return vj - .5*vk
+
+    def get_cluster_veff(self) -> list[np.ndarray]:
+        """J - K/2 (AO) of each cluster density, in one J/K build
+        """
+        if len(self.clusters) == 0:
+            return []
+        return list(self._get_veff(*zip(*[self._cluster_natural_orbitals(i, d) for i, d in enumerate(self.cluster_1rdm)])))
 
     def set_clusters_from_ao(self, ao_labels:list[list[str]], fspace:list[tuple[int,int]], method='meta_lowdin') -> None:
         """Define the clusters directly from atomic orbitals.
@@ -434,17 +493,19 @@ class CMF(lib.StreamObject):
         d1, d2 = solver.make_rdm12(ci, norb, nelec)
         return e, ci, d1, d2
 
-    def cmf_ci(self, eris=None) -> float:
+    def cmf_ci(self, eri_act=None) -> float:
         """
         Converge the cluster states for the current orbitals (CMF-CI)
 
-        Each cluster is solved with FCI in the mean field (J - K/2, built in the AO basis) of the core
-        and the other clusters, until the cluster 1RDMs stop changing.
+        Each cluster is solved with FCI in the mean field (J - K/2) of the core and the other clusters,
+        until the cluster 1RDMs stop changing. The core potential is built once in the AO basis; the
+        interactions between clusters only need the integrals of the active orbitals, so the sweeps
+        do not touch the AO basis.
 
         Parameters
         ----------
-        eris : list
-            (tu|vw) of each cluster, computed if not given
+        eri_act : np.ndarray
+            (pq|rs) of all active orbitals, computed if not given
 
         Returns
         -------
@@ -455,42 +516,53 @@ class CMF(lib.StreamObject):
         nclusters = len(self.clusters)
         if self.cluster_1rdm is None:
             self.cluster_1rdm = self.get_init_guess_rdm1()
+        if eri_act is None:
+            eri_act = self.get_active_eris()
 
         hcore = self.mf.get_hcore()
-        if eris is None:
-            eris = self.get_cluster_eris()
-        dm_core = self.get_core_dm()
-        dms = self.get_cluster_dms()
-        vcore, vclusters = self.get_veff()
+        Ccore = np.hstack((self.Cfrz, self.Cdoc))
+        vcore = self._get_veff([Ccore], [np.full(Ccore.shape[1], 2.0)])[0]
+        e_core = self.mf.energy_nuc() + np.einsum('ij,ji->', self.get_core_dm(), hcore + .5*vcore)
+        h_act = self.Cact.T @ (hcore + vcore) @ self.Cact
+
+        eris = [eri_act[np.ix_(ci, ci, ci, ci)] for ci in self.clusters]
+        vact = [self._get_active_veff(i, d, eri_act) for i, d in enumerate(self.cluster_1rdm)]
+        v_sum = sum(vact) + np.zeros_like(h_act)
+        dm_act = self.make_rdm1()
 
         e_tot = 0.0
         conv = False
         for it in range(self.max_cycle_rdm1):
             d_err = 0.0
-            for i in range(nclusters):
-                dm_env = dm_core + sum(dms) - dms[i]
-                v_env  = vcore + sum(vclusters) - vclusters[i]
-                h0, h1 = self.get_cluster_hamiltonian(i, dm_env, v_env, hcore)
-                e, ci, d1, d2 = self.solve_cluster(i, h0, h1, eris[i])
+            for i, ci in enumerate(self.clusters):
+                idx = np.ix_(ci, ci)
+                v_env = v_sum - vact[i]
+                dm_env = dm_act.copy()
+                dm_env[idx] = 0
+                h0 = e_core + np.einsum('ij,ji->', dm_env, h_act + .5*v_env)
+                e, civec, d1, d2 = self.solve_cluster(i, h0, (h_act + v_env)[idx], eris[i])
 
                 d_err = max(d_err, np.linalg.norm(d1 - self.cluster_1rdm[i]))
-                self.ci[i] = ci
+                self.ci[i] = civec
                 self.cluster_energies[i] = e
                 self.cluster_1rdm[i] = d1
                 self.cluster_2rdm[i] = d2
+                dm_act[idx] = d1
 
                 if self.sequential:
-                    Ci = self.Cact[:, self.clusters[i]]
-                    dms[i] = Ci @ d1 @ Ci.T
-                    vj, vk = self.mf.get_jk(self.mol, dms[i], hermi=1)
-                    vclusters[i] = vj - .5*vk
+                    v_i = self._get_active_veff(i, d1, eri_act)
+                    v_sum += v_i - vact[i]
+                    vact[i] = v_i
 
             if not self.sequential and nclusters > 0:
-                dms = self.get_cluster_dms()
-                vj, vk = self.mf.get_jk(self.mol, np.asarray(dms), hermi=1)
-                vclusters = list(vj - .5*vk)
+                vact = [self._get_active_veff(i, d, eri_act) for i, d in enumerate(self.cluster_1rdm)]
+                v_sum = sum(vact)
 
-            e_last, e_tot = e_tot, self.energy((vcore, vclusters), eris, hcore)
+            e_last = e_tot
+            e_tot = e_core + np.einsum('ij,ji->', dm_act, h_act + .5*v_sum)
+            for i, ci in enumerate(self.clusters):
+                e_tot += (.5*np.einsum('tuvw,tuvw->', eris[i], self.cluster_2rdm[i])
+                          - .5*np.einsum('ij,ji->', self.cluster_1rdm[i], vact[i][np.ix_(ci, ci)]))
             log.debug('CMF-CI iter %3d  E = %.12f  dE = %.3e  |dD| = %.3e', it, e_tot, e_tot - e_last, d_err)
             if d_err < self.conv_tol_rdm1:
                 conv = True
@@ -503,8 +575,7 @@ class CMF(lib.StreamObject):
                 ss = fci.spin_square(self.ci[i], len(ci), self.fspace[i])[0]
                 log.debug('  cluster %3d  E = %.12f  <S^2> = %.4f', i, self.cluster_energies[i], ss)
 
-        self._veff = (vcore, vclusters)
-        self._eris = eris
+        self._vcore = vcore
         self.e_tot = e_tot
         return e_tot
 
@@ -643,16 +714,17 @@ class CMF(lib.StreamObject):
         def energy_and_grad(x):
             K = unpack(x)
             self.set_mo_coeffs(C0 @ scipy.linalg.expm(K))
-            eris_ao = self.get_cluster_eris_ao()
-            e = self.cmf_ci(self.get_cluster_eris(eris_ao))
+            e = self.cmf_ci(self.get_active_eris())
+            veff[:] = [self._vcore, self.get_cluster_veff()]
             # chain rule through exp(K): the adjoint of the Frechet derivative of exp at K is the one at K^T
-            dEdU = C0.T @ self.energy_deriv(self._veff, eris_ao)
+            dEdU = C0.T @ self.energy_deriv(veff, self.get_cluster_eris_ao())
             dEdK = scipy.linalg.expm_frechet(K.T, dEdU, compute_expm=False)
             return e, (dEdK - dEdK.T)[mask]
 
+        veff = [None, None]     # J - K/2 of the core and the clusters at the last evaluation
         x = np.zeros(np.count_nonzero(mask))
         e, g = energy_and_grad(x)
-        hdiag = np.maximum(abs(self.approx_hessian_diag(self._veff)[mask]), 0.1)
+        hdiag = np.maximum(abs(self.approx_hessian_diag(veff)[mask]), 0.1)
         log.info('ooCMF iter %3d  E = %.12f  |g| = %.3e', 0, e, np.linalg.norm(g))
 
         s_hist, y_hist = [], []

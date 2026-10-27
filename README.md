@@ -89,10 +89,20 @@ For example `mf.dip_moment(mol, cmf.make_rdm1(ao_repr=True))` or `pyscf.tools.mo
 
 ### Large systems
 
-* Use density fitting, `mf = scf.RHF(mol).density_fit()`: both the J/K builds and the cluster integrals then use it.
-* `cmf.sequential = False` builds the J/K of all clusters in one pass per CMF-CI sweep, instead of one pass per cluster.
-* Per energy evaluation the cost is a few J/K builds (about one SCF iteration each) plus one integral transformation
-  per cluster. As a reference, one direct (no density fitting) J/K build for the 1116-AO Fe₂ complex takes about 12 minutes on 4 cores.
+Per energy evaluation (one orbital step) the AO work is fixed, independent of the number of clusters
+and of the number of CMF-CI sweeps:
+
+* a J/K build for the core density and a transformation of the active-orbital integrals `(aa|aa)`,
+* the CMF-CI sweeps, which only use active-orbital quantities,
+* a J/K build for the converged cluster densities and one pass for the `(μu|vw)` of all clusters (gradient).
+
+The densities are passed to `mf.get_jk` together with their orbitals, so density-fitted K costs
+`O(N_aux N_AO² N_occ)`. `(aa|aa)` needs `8 n_act⁴` bytes (0.8 GB for 100 active orbitals, 13 GB for 200).
+
+Use density fitting, `mf = scf.RHF(mol).density_fit()`. Its 3-index integrals, `8 N_aux N_AO²/2` bytes, have to fit in memory:
+for a 200-atom organic molecule that is about 9 GB in STO-3G, 30 GB in 6-31G and 90-140 GB in def2-SVP
+(`weigend` or `def2-universal-jkfit`). Without density fitting, one direct J/K build for the 1116-AO Fe₂ complex
+takes about 12 minutes on 4 cores.
 
 ### Copyright
 

@@ -157,3 +157,10 @@ def test_density_fitting():
     eri = cmf.ao2mo((cmf.Cact,) * 4)
     e_mo = cmf.active_h0 + np.einsum('pq,pq', cmf.active_h1, d1) + .5*np.einsum('pqrs,pqrs', eri, d2)
     assert abs(cmf.energy() - e_mo) < 1e-10
+
+    # (mu u|v w) of all clusters from a single pass over the 3-index integrals
+    eye = np.eye(mol.nao)
+    for ci, eri_ao in zip(cmf.clusters, cmf.get_cluster_eris_ao()):
+        Ci = cmf.Cact[:, ci]
+        ref = mf.with_df.ao2mo((eye, Ci, Ci, Ci), compact=False).reshape(eri_ao.shape)
+        assert abs(eri_ao - ref).max() < 1e-12
