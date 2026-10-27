@@ -73,6 +73,12 @@ class CMF(lib.StreamObject):
         self.mo_coeff = None
         self.converged = False
 
+        # State averaging, see state_average_
+        self.sa_weights = None
+        self.sa_states = None
+        self.e_states = None
+        self._state = 0
+
     def set_Cfrz(self, C:np.ndarray):
         """Define the frozen orbitals which are not optimized. 
         """
@@ -121,8 +127,65 @@ class CMF(lib.StreamObject):
         self.cluster_1rdm = None    # spin summed 1RDM of each cluster, None -> guess from self.mf
         self.cluster_2rdm = [None for i in clusters]   # spin free 2RDM of each cluster
         self.ci = [None for i in clusters]
-        self.roots = [1 for i in clusters] 
-    
+        self.roots = [1 for i in clusters]
+        self.sa_weights = None
+        self.sa_states = None
+        self.e_states = None
+        self._state = 0
+
+    def state_average_(self, fspaces:list[list[tuple[int,int]]], weights=None):
+        """Optimize the orbitals for the weighted average energy of several product states.
+
+        Each state has its own cluster states, set by its `fspace`, and all states share the orbitals.
+        For a mixed-valence dimer, averaging the two valence-trapped configurations, e.g.
+        `[[(5,1), (5,0)], [(5,0), (5,1)]]`, gives orbitals that are not biased towards either one.
+        `cmf_ci`, `orbital_gradient` and `kernel` then work with the average energy (`e_tot`) and
+        the energy of each state is in `e_states`. Use `select_state(k)` to get the RDMs of state `k`.
+
+        Parameters
+        ----------
+        fspaces : list
+            For each state, a list of tuples indicating how many alpha and beta electrons are in each cluster
+        weights : list
+            Weight of each state, equal weights by default
+        """
+        nelec = [sum(na+nb for na, nb in f) for f in fspaces]
+        assert all(len(f) == len(self.clusters) for f in fspaces)
+        assert len(set(nelec)) == 1, "all states need the same number of electrons"
+        if weights is None:
+            weights = np.ones(len(fspaces))
+        self.sa_weights = np.asarray(weights, dtype=float) / np.sum(weights)
+        self.sa_states = [dict(fspace=[tuple(fi) for fi in f],
+                               ci=[None for i in self.clusters],
+                               cluster_1rdm=None,
+                               cluster_2rdm=[None for i in self.clusters],
+                               cluster_energies=[0.0 for i in self.clusters]) for f in fspaces]
+        self.e_states = [None for f in fspaces]
+        self._state = 0
+        for key, val in self.sa_states[0].items():
+            setattr(self, key, val)
+        return self
+
+    def select_state(self, k:int) -> None:
+        """Make state `k` of a state-averaged calculation the current one, e.g. for its RDMs or `analyze`
+        """
+        if k == self._state:
+            return
+        if self.sa_states is None:
+            raise ValueError('no state averaging, see state_average_')
+        for key in self.sa_states[self._state]:
+            self.sa_states[self._state][key] = getattr(self, key)
+        for key, val in self.sa_states[k].items():
+            setattr(self, key, val)
+        self._state = k
+
+    def _states(self) -> list[tuple]:
+        """(index, weight) of each state in the energy: a single state, or the state-averaged ones
+        """
+        if self.sa_states is None:
+            return [(None, 1.0)]
+        return list(enumerate(self.sa_weights))
+
     def rotate_mo_coeffs(self, U:np.ndarray) -> None:
         """Rotate the [doc, act, vir] orbitals, C -> C U
         """
@@ -166,6 +229,9 @@ class CMF(lib.StreamObject):
         log.info('conv_tol = %g  conv_tol_grad = %g  max_cycle = %d', self.conv_tol, self.conv_tol_grad, self.max_cycle)
         log.info('conv_tol_rdm1 = %g  max_cycle_rdm1 = %d  sequential = %s',
                  self.conv_tol_rdm1, self.max_cycle_rdm1, self.sequential)
+        if self.sa_states is not None:
+            for k, (w, st) in enumerate(zip(self.sa_weights, self.sa_states)):
+                log.info('state %d  weight %.3f  fspace = %s', k, w, st['fspace'])
         nelec = 2*(self.Cfrz.shape[1] + self.Cdoc.shape[1]) + sum(na+nb for na, nb in self.fspace)
         if nelec != self.mol.nelectron:
             log.warn('CMF has %d electrons, but the molecule has %d', nelec, self.mol.nelectron)
@@ -493,35 +559,60 @@ class CMF(lib.StreamObject):
         d1, d2 = solver.make_rdm12(ci, norb, nelec)
         return e, ci, d1, d2
 
-    def cmf_ci(self, eri_act=None) -> float:
+    def get_core_veff(self) -> np.ndarray:
+        """J - K/2 (AO) of the frozen and doubly occupied orbitals
+        """
+        Ccore = np.hstack((self.Cfrz, self.Cdoc))
+        return self._get_veff([Ccore], [np.full(Ccore.shape[1], 2.0)])[0]
+
+    def cmf_ci(self, eri_act=None, vcore=None) -> float:
         """
         Converge the cluster states for the current orbitals (CMF-CI)
 
         Each cluster is solved with FCI in the mean field (J - K/2) of the core and the other clusters,
         until the cluster 1RDMs stop changing. The core potential is built once in the AO basis; the
         interactions between clusters only need the integrals of the active orbitals, so the sweeps
-        do not touch the AO basis.
+        do not touch the AO basis. With `state_average_` every state is converged and the average
+        energy is returned.
 
         Parameters
         ----------
         eri_act : np.ndarray
             (pq|rs) of all active orbitals, computed if not given
+        vcore : np.ndarray
+            J - K/2 (AO) of the core, computed if not given
 
         Returns
         -------
         e_tot : float
             CMF energy
         """
+        if eri_act is None:
+            eri_act = self.get_active_eris()
+        if vcore is None:
+            vcore = self.get_core_veff()
+        e_tot = 0.0
+        for k, w in self._states():
+            if k is None:
+                e_tot = self._cmf_ci(eri_act, vcore)
+            else:
+                self.select_state(k)
+                self.e_states[k] = self._cmf_ci(eri_act, vcore)
+                e_tot += w * self.e_states[k]
+        if self.sa_states is not None:
+            self.select_state(0)
+        self.e_tot = e_tot
+        return e_tot
+
+    def _cmf_ci(self, eri_act, vcore) -> float:
+        """CMF-CI for the current state
+        """
         log = logger.new_logger(self)
         nclusters = len(self.clusters)
         if self.cluster_1rdm is None:
             self.cluster_1rdm = self.get_init_guess_rdm1()
-        if eri_act is None:
-            eri_act = self.get_active_eris()
 
         hcore = self.mf.get_hcore()
-        Ccore = np.hstack((self.Cfrz, self.Cdoc))
-        vcore = self._get_veff([Ccore], [np.full(Ccore.shape[1], 2.0)])[0]
         e_core = self.mf.energy_nuc() + np.einsum('ij,ji->', self.get_core_dm(), hcore + .5*vcore)
         h_act = self.Cact.T @ (hcore + vcore) @ self.Cact
 
@@ -574,9 +665,6 @@ class CMF(lib.StreamObject):
             for i, ci in enumerate(self.clusters):
                 ss = fci.spin_square(self.ci[i], len(ci), self.fspace[i])[0]
                 log.debug('  cluster %3d  E = %.12f  <S^2> = %.4f', i, self.cluster_energies[i], ss)
-
-        self._vcore = vcore
-        self.e_tot = e_tot
         return e_tot
 
     def energy(self, veff=None, eris=None, hcore=None) -> float:
@@ -639,10 +727,29 @@ class CMF(lib.StreamObject):
             dEdC[:, ndoc + np.asarray(ci)] += 2*(x - vclusters[i] @ Ci @ self.cluster_1rdm[i])
         return dEdC
 
-    def get_gen_fock(self, veff=None) -> np.ndarray:
+    def get_gen_fock(self, veff=None, eris_ao=None) -> np.ndarray:
         """Generalized Fock matrix, F = 1/2 C^T dE/dC, in the [doc, act, vir] orbital basis
         """
-        return .5 * self.get_mo_coeffs().T @ self.energy_deriv(veff)
+        return .5 * self.get_mo_coeffs().T @ self.energy_deriv(veff, eris_ao)
+
+    def _average_deriv(self, vcore, eris_ao, with_hdiag=False) -> (np.ndarray, np.ndarray):
+        """dE/dC averaged over the states (one state without `state_average_`), and optionally the
+        averaged diagonal Hessian guess, for the current orbitals and cluster states
+        """
+        dEdC = 0
+        hdiag = None
+        for k, w in self._states():
+            if k is not None:
+                self.select_state(k)
+            veff = (vcore, self.get_cluster_veff())
+            d = self.energy_deriv(veff, eris_ao)
+            dEdC = dEdC + w * d
+            if with_hdiag:
+                h = w * self.approx_hessian_diag(veff, d)
+                hdiag = h if hdiag is None else hdiag + h
+        if self.sa_states is not None:
+            self.select_state(0)
+        return dEdC, hdiag
 
     def rotation_mask(self) -> np.ndarray:
         """
@@ -666,24 +773,30 @@ class CMF(lib.StreamObject):
         Compute current CMF orbital gradient
 
         g_pq = dE/dkappa_pq = 2 (F_pq - F_qp) for C -> C exp(kappa), as an antisymmetric matrix
-        in the [doc, act, vir] orbital basis with the redundant rotations set to zero
+        in the [doc, act, vir] orbital basis with the redundant rotations set to zero.
+        With `state_average_` this is the gradient of the average energy.
         """
-        F = self.get_gen_fock(veff)
+        if self.sa_states is None:
+            F = self.get_gen_fock(veff)
+        else:
+            F = .5 * self.get_mo_coeffs().T @ self._average_deriv(self.get_core_veff(), self.get_cluster_eris_ao())[0]
         mask = self.rotation_mask()
         return 2*(F - F.T) * (mask | mask.T)
 
-    def approx_hessian_diag(self, veff=None) -> np.ndarray:
+    def approx_hessian_diag(self, veff=None, dEdC=None) -> np.ndarray:
         """
         Diagonal orbital Hessian guess, 2 (n_p f_qq + n_q f_pp - F_pp - F_qq), where f is the
         mean-field Fock matrix and F the generalized Fock matrix
         """
         if veff is None:
             veff = self.get_veff()
+        if dEdC is None:
+            dEdC = self.energy_deriv(veff)
         vcore, vclusters = veff
         C = self.get_mo_coeffs()
         f = np.diag(C.T @ (self.mf.get_hcore() + vcore + sum(vclusters)) @ C)
         n = np.diag(self.get_occ())
-        F = np.diag(self.get_gen_fock(veff))
+        F = .5 * np.einsum('mp,mp->p', C, dEdC)
         return 2*(n[:, None]*f[None, :] + n[None, :]*f[:, None] - F[:, None] - F[None, :])
 
     def kernel(self) -> float:
@@ -711,20 +824,21 @@ class CMF(lib.StreamObject):
             K[mask] = x
             return K - K.T
 
-        def energy_and_grad(x):
+        def energy_and_grad(x, with_hdiag=False):
             K = unpack(x)
             self.set_mo_coeffs(C0 @ scipy.linalg.expm(K))
-            e = self.cmf_ci(self.get_active_eris())
-            veff[:] = [self._vcore, self.get_cluster_veff()]
+            vcore = self.get_core_veff()
+            e = self.cmf_ci(self.get_active_eris(), vcore)
+            dEdC, hdiag = self._average_deriv(vcore, self.get_cluster_eris_ao(), with_hdiag)
             # chain rule through exp(K): the adjoint of the Frechet derivative of exp at K is the one at K^T
-            dEdU = C0.T @ self.energy_deriv(veff, self.get_cluster_eris_ao())
-            dEdK = scipy.linalg.expm_frechet(K.T, dEdU, compute_expm=False)
+            dEdK = scipy.linalg.expm_frechet(K.T, C0.T @ dEdC, compute_expm=False)
+            if with_hdiag:
+                return e, (dEdK - dEdK.T)[mask], hdiag
             return e, (dEdK - dEdK.T)[mask]
 
-        veff = [None, None]     # J - K/2 of the core and the clusters at the last evaluation
         x = np.zeros(np.count_nonzero(mask))
-        e, g = energy_and_grad(x)
-        hdiag = np.maximum(abs(self.approx_hessian_diag(veff)[mask]), 0.1)
+        e, g, hdiag = energy_and_grad(x, with_hdiag=True)
+        hdiag = np.maximum(abs(hdiag[mask]), 0.1)
         log.info('ooCMF iter %3d  E = %.12f  |g| = %.3e', 0, e, np.linalg.norm(g))
 
         s_hist, y_hist = [], []
@@ -774,6 +888,9 @@ class CMF(lib.StreamObject):
             log.note('ooCMF converged  E = %.12f', e)
         else:
             log.note('ooCMF not converged  E = %.12f  |g| = %.3e', e, np.linalg.norm(g))
+        if self.sa_states is not None:
+            for k, (w, ek) in enumerate(zip(self.sa_weights, self.e_states)):
+                log.note('  state %d  weight %.3f  E = %.12f  fspace = %s', k, w, ek, self.sa_states[k]['fspace'])
         self.e_tot = e
         self.mo_coeff = np.hstack((self.Cfrz, self.get_mo_coeffs()))
         return e
@@ -931,7 +1048,10 @@ class CMF(lib.StreamObject):
         """
         log = logger.new_logger(self, verbose)
         ss, multip, ss_clusters = self.spin_square()
-        log.note('CMF energy = %.12f', self.e_tot)
+        if self.sa_states is None:
+            log.note('CMF energy = %.12f', self.e_tot)
+        else:
+            log.note('CMF energy of state %d = %.12f  (state average %.12f)', self._state, self.e_states[self._state], self.e_tot)
         log.note('cluster  (na, nb)      N       <S_I^2>   E (cluster in its embedding)')
         for i, ci in enumerate(self.clusters):
             d1 = self.cluster_1rdm[i]
@@ -943,6 +1063,68 @@ class CMF(lib.StreamObject):
         pop_and_charges = scf.uhf.mulliken_meta(self.mol, dm, verbose=log, s=self.S)
         dip = scf.hf.dip_moment(self.mol, dm[0] + dm[1], verbose=log)
         return pop_and_charges, dip
+
+    def export_fermicg(self, filename:str) -> None:
+        """
+        Write the active-space problem for post-cMF methods in FermiCG.jl (TPSCI, BST, PT2) to an npz file.
+
+        The active orbitals are reordered so that the orbitals of each cluster are contiguous. Keys:
+
+        h0, h1, h2      `InCoreInts` in the current orbitals: core energy (with nuclear repulsion),
+                        one-electron integrals dressed with J - K/2 of the frozen and doubly occupied
+                        orbitals, and (pq|rs)
+        cluster_index   cluster (1-based) of each active orbital
+        fspace          (nclusters, 2) alpha and beta electrons of each cluster, the reference `FockConfig`
+        fspace_states   (nstates, nclusters, 2) and `weights` of the states, see `state_average_`
+        rdm1a, rdm1b    active-space 1RDMs for embedding the cluster bases; each cluster is an Ms ensemble,
+                        so they are equal, and they are averaged over the states
+        mo_coeff        AO coefficients of [frozen, doubly occupied, active (reordered), virtual]
+        ncore           number of frozen and doubly occupied orbitals
+        e_cmf           CMF energy (state average), and `e_states`
+
+        In Julia::
+
+            using NPZ, QCBase, RDM, InCoreIntegrals, FermiCG
+            d = npzread("cmf.npz")
+            ints = InCoreInts(first(d["h0"]), d["h1"], d["h2"])
+            clusters = [MOCluster(i, findall(==(i), d["cluster_index"])) for i in 1:maximum(d["cluster_index"])]
+            init_fspace = FockConfig([Tuple(d["fspace"][i, :]) for i in 1:size(d["fspace"], 1)])
+            d1 = RDM1(d["rdm1a"], d["rdm1b"])
+        """
+        if self.cluster_1rdm is None:
+            raise RuntimeError('run cmf_ci or kernel first')
+        order = np.asarray(sum(self.clusters, []), dtype=int)
+        cluster_index = np.concatenate([np.full(len(ci), i+1) for i, ci in enumerate(self.clusters)])
+        Cact = self.Cact[:, order]
+
+        hcore = self.mf.get_hcore()
+        vcore = self.get_core_veff()
+        h0 = self.mf.energy_nuc() + np.einsum('ij,ji->', self.get_core_dm(), hcore + .5*vcore)
+        h1 = Cact.T @ (hcore + vcore) @ Cact
+        h2 = self.ao2mo((Cact,) * 4)
+
+        dm1 = 0
+        for k, w in self._states():
+            if k is not None:
+                self.select_state(k)
+            dm1 = dm1 + w * self.make_rdm1()
+        if self.sa_states is None:
+            fspace_states, weights, e_states = [self.fspace], [1.0], [self.e_tot]
+        else:
+            self.select_state(0)
+            fspace_states, weights, e_states = [st['fspace'] for st in self.sa_states], self.sa_weights, self.e_states
+        dm1 = dm1[np.ix_(order, order)]
+
+        np.savez(filename, h0=np.float64(h0), h1=h1, h2=h2,
+                 cluster_index=cluster_index.astype(np.int64),
+                 fspace=np.asarray(self.fspace, dtype=np.int64),
+                 fspace_states=np.asarray(fspace_states, dtype=np.int64),
+                 weights=np.asarray(weights, dtype=float),
+                 rdm1a=.5*dm1, rdm1b=.5*dm1,
+                 mo_coeff=np.hstack((self.Cfrz, self.Cdoc, Cact, self.Cvir)),
+                 ncore=np.int64(self.Cfrz.shape[1] + self.Cdoc.shape[1]),
+                 e_cmf=np.float64(self.e_tot),
+                 e_states=np.asarray(e_states, dtype=float))
 
 
 def _lbfgs_direction(g, s_hist, y_hist, hdiag):

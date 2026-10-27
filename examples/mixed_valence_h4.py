@@ -25,3 +25,11 @@ for R in [2.0, 3.0, 5.0, 10.0]:
 cmf.verbose = 4
 cmf.analyze()
 dm_a, dm_b = cmf.make_rdm1s(ao_repr=True)   # AO densities, e.g. for pyscf.prop or cubegen
+
+# Orbitals shared by both charge-localized states, and export for TPSCI in FermiCG.jl
+cmf = pycmf.CMF(mf)
+cmf.set_clusters_from_ao([['0 H', '1 H'], ['2 H', '3 H']], [(1, 1), (1, 0)])
+cmf.state_average_([[(1, 1), (1, 0)], [(1, 0), (1, 1)]])
+cmf.kernel()
+print(" state-averaged cMF: E = %14.8f, states %s" % (cmf.e_tot, " ".join("%.8f" % e for e in cmf.e_states)))
+cmf.export_fermicg('h4_cation_cmf.npz')

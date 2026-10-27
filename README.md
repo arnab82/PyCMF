@@ -74,6 +74,57 @@ optimization relaxes everything. See `examples/mixed_valence_h4.py` (a toy mixed
 the charge and cMF localizes it) and `examples/fe2_mixed_valence.py` (an Fe₂(μ-H)₂ complex). The coupling between
 the charge-localized (or spin-coupled) cluster states is intercluster correlation, left to post-cMF methods.
 
+### State averaging (mixed valence)
+
+Orbitals optimized for one charge-localized configuration are biased against its mirror image. In
+`examples/mixed_valence_h4.py` at 3 Å, the orbitals of H₂ + H₂⁺ put H₂⁺ + H₂ 4.7 mEh too high.
+`state_average_` optimizes one set of orbitals for the weighted average energy of several product states,
+each with its own cluster states:
+
+```python
+cmf.set_clusters_from_ao([['0 Fe 3d'], ['1 Fe 3d']], [(5, 1), (5, 0)])
+cmf.state_average_([[(5, 1), (5, 0)], [(5, 0), (5, 1)]])   # weights=[...] optional, equal by default
+cmf.kernel()              # e_tot: average energy, e_states: energy of each state
+cmf.select_state(1)       # RDMs, analyze() and export for state 1
+```
+
+In the toy example the two states come out exactly degenerate, each 1.0 mEh above the state-specific optimum.
+Each extra state costs one CMF-CI and one J/K build per orbital step.
+
+### Post-cMF in FermiCG.jl
+
+`export_fermicg` writes the active-space Hamiltonian in the optimized orbitals (dressed by the doubly occupied
+orbitals), the clusters, their Fock sectors and the embedding 1RDM to an npz file, so the inter-cluster
+correlation (TPSCI, BST, PT2) can be added with [FermiCG.jl](https://github.com/mayhallgroup/FermiCG):
+
+```python
+cmf.export_fermicg('cmf.npz')
+```
+
+```julia
+using NPZ, QCBase, RDM, InCoreIntegrals, FermiCG
+d = npzread("cmf.npz")
+ints = InCoreInts(first(d["h0"]), d["h1"], d["h2"])
+clusters = [MOCluster(i, findall(==(i), d["cluster_index"])) for i in 1:maximum(d["cluster_index"])]
+init_fspace = FockConfig([Tuple(d["fspace"][i, :]) for i in 1:size(d["fspace"], 1)])
+d1 = RDM1(d["rdm1a"], d["rdm1b"])
+
+cluster_bases = FermiCG.compute_cluster_eigenbasis_spin(ints, clusters, d1, [1, 1], init_fspace, max_roots=20)
+clustered_ham = FermiCG.extract_ClusteredTerms(ints, clusters)
+cluster_ops   = FermiCG.compute_cluster_ops(cluster_bases, ints)
+FermiCG.add_cmf_operators!(cluster_ops, cluster_bases, ints, d1.a, d1.b)
+
+ci_vector = FermiCG.TPSCIstate(clusters, init_fspace, R=4)
+# for a state-averaged run, add the other configurations, e.g. the mirror one
+# FermiCG.add_fockconfig!(ci_vector, FockConfig([Tuple(d["fspace_states"][2, i, :]) for i in 1:length(clusters)]))
+ci_vector = FermiCG.add_spin_focksectors(ci_vector)
+e0, v0 = FermiCG.tpsci_ci(ci_vector, cluster_ops, clustered_ham, thresh_cipsi=1e-3, thresh_foi=1e-5, thresh_asci=-1)
+```
+
+`[1, 1]` lets each cluster gain or lose one electron, which the hopping between the metals needs. The other keys
+are `fspace_states`, `weights`, `e_cmf`, `e_states`, `mo_coeff` (AO coefficients of [frozen, doubly occupied,
+active, virtual]) and `ncore`.
+
 ### RDMs and properties
 
 | method | returns |

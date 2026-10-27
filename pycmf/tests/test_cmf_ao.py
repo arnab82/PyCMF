@@ -164,3 +164,70 @@ def test_density_fitting():
         Ci = cmf.Cact[:, ci]
         ref = mf.with_df.ao2mo((eye, Ci, Ci, Ci), compact=False).reshape(eri_ao.shape)
         assert abs(eri_ao - ref).max() < 1e-12
+
+
+def _h4_cation(R=3.0):
+    mol = gto.M(atom=[['H', (0, 0, 0)], ['H', (0, 0, .74)], ['H', (R, 0, 0)], ['H', (R, 0, .74)]],
+                basis='6-31g', charge=1, spin=1, verbose=0)
+    mf = scf.ROHF(mol).run(conv_tol=1e-12)
+    cmf = pycmf.CMF(mf)
+    cmf.set_clusters_from_ao([['0 H', '1 H'], ['2 H', '3 H']], [(1, 1), (1, 0)])
+    return cmf
+
+
+def test_state_average_gradient():
+    """Gradient of the state-averaged energy against finite differences"""
+    cmf = _h4_cation()
+    cmf.state_average_([[(1, 1), (1, 0)], [(1, 0), (1, 1)]], weights=[.7, .3])
+    cmf.conv_tol_rdm1 = 1e-11
+    e = cmf.cmf_ci()
+    assert abs(e - (.7*cmf.e_states[0] + .3*cmf.e_states[1])) < 1e-12
+    g = cmf.orbital_gradient()
+    C0 = cmf.get_mo_coeffs()
+    h = 1e-4
+    for p, q in [(2, 0), (5, 1), (6, 3), (7, 2)]:
+        es = []
+        for sign in (1, -1):
+            K = np.zeros_like(g)
+            K[p, q], K[q, p] = sign*h, -sign*h
+            cmf.set_mo_coeffs(C0 @ scipy.linalg.expm(K))
+            es.append(cmf.cmf_ci())
+        assert abs((es[0] - es[1]) / (2*h) - g[p, q]) < 1e-7
+
+
+def test_state_average_mixed_valence():
+    """
+    Averaging the two charge-localized states of (H2)2+ gives orbitals shared by both: the two state energies
+    are equal by symmetry and lie above the state-specific cMF energy
+    """
+    cmf = _h4_cation()
+    e_ss = cmf.kernel()
+
+    cmf = _h4_cation()
+    cmf.state_average_([[(1, 1), (1, 0)], [(1, 0), (1, 1)]])
+    e_sa = cmf.kernel()
+    assert cmf.converged
+    assert abs(cmf.e_states[0] - cmf.e_states[1]) < 1e-6
+    assert e_ss - 1e-9 < e_sa < e_ss + 1e-2
+
+    cmf.select_state(1)
+    assert cmf.fspace == [(1, 0), (1, 1)]
+    assert abs(np.trace(cmf.cluster_1rdm[0]) - 1) < 1e-10
+
+
+def test_export_fermicg(tmp_path):
+    """The exported active-space Hamiltonian and RDMs give back the CMF energy, with each cluster made contiguous"""
+    cmf = _n2_quartets()
+    perm = [0, 3, 1, 4, 2, 5]
+    cmf.set_Cact(cmf.Cact[:, perm], [[0, 2, 4], [1, 3, 5]], [(3, 0), (2, 1)])
+    e = cmf.cmf_ci()
+
+    cmf.export_fermicg(str(tmp_path / 'cmf.npz'))
+    d = np.load(tmp_path / 'cmf.npz')
+    order = [0, 2, 4, 1, 3, 5]
+    d2 = cmf.make_rdm12()[1][np.ix_(order, order, order, order)]
+    e_npz = d['h0'] + np.einsum('pq,pq', d['h1'], d['rdm1a'] + d['rdm1b']) + .5*np.einsum('pqrs,pqrs', d['h2'], d2)
+    assert abs(e_npz - e) < 1e-10
+    assert d['cluster_index'].tolist() == [1, 1, 1, 2, 2, 2]
+    assert d['fspace'].tolist() == [[3, 0], [2, 1]]
+    assert np.allclose(d['mo_coeff'][:, d['ncore']:d['ncore']+6], cmf.Cact[:, order])
