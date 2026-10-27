@@ -448,7 +448,8 @@ class CMF(lib.StreamObject):
             return []
         return list(self._get_veff(*zip(*[self._cluster_natural_orbitals(i, d) for i, d in enumerate(self.cluster_1rdm)])))
 
-    def set_clusters_from_ao(self, ao_labels:list[list[str]], fspace:list[tuple[int,int]], method='meta_lowdin') -> None:
+    def set_clusters_from_ao(self, ao_labels:list[list[str]], fspace:list[tuple[int,int]], method='meta_lowdin',
+                             guess='ao') -> None:
         """Define the clusters directly from atomic orbitals.
 
         The orbitals of cluster `I` are the orthogonalized AOs matching `ao_labels[I]`, e.g. `['0 Fe 3d']`.
@@ -468,16 +469,23 @@ class CMF(lib.StreamObject):
             A list of tuples indicating how many alpha and beta electrons are in each cluster
         method : str
             Orthogonalization of the AOs, see `pyscf.lo.orth_ao`
+        guess : str
+            'ao': the active orbitals are the orthogonalized AOs themselves. 'spade': the mean-field orbitals that
+            overlap most with these AOs, rotated within the doubly occupied, singly occupied and virtual orbitals
+            separately (SPADE), first for all clusters and then for each cluster, and orthonormalized symmetrically;
+            the other mean-field orbitals stay doubly occupied or virtual. The starting energy is then close to the
+            mean-field one, which helps for large active spaces with correlating shells (e.g. 4d, 3p), where the bare
+            AOs take bonding character away from the doubly occupied orbitals.
         """
         assert self.Cfrz.shape[1] == 0, "frozen orbitals are not supported here"
-        X = lo.orth_ao(self.mol, method, s=self.S)
-
         clusters = []
         idx_act = []
+        idx_clusters = []
         for labels in ao_labels:
             labels = [labels] if isinstance(labels, str) else labels
             idx = sorted(set(i for label in labels for i in _search_ao(self.mol, label)))
             clusters.append(list(range(len(idx_act), len(idx_act) + len(idx))))
+            idx_clusters.append(idx)
             idx_act += idx
         assert len(set(idx_act)) == len(idx_act), "the same AO is in more than one cluster"
         idx_rest = [i for i in range(self.nbas) if i not in idx_act]
@@ -485,6 +493,17 @@ class CMF(lib.StreamObject):
         nelec_act = sum(na+nb for na, nb in fspace)
         assert (self.mol.nelectron - nelec_act) % 2 == 0
         ndoc = (self.mol.nelectron - nelec_act) // 2
+
+        if guess == 'spade':
+            Cdoc, frags, Cvir = _spade_clusters(self.mf, self.S, idx_act, idx_clusters, nelec_act)
+            self.set_Cdoc(Cdoc)
+            self.set_Cact(np.hstack(frags), clusters, fspace)
+            self.set_Cvir(Cvir)
+            self._ao_clusters = (ao_labels, fspace, method, guess)
+            return
+        elif guess != 'ao':
+            raise ValueError("guess must be 'ao' or 'spade'")
+        X = lo.orth_ao(self.mol, method, s=self.S)
 
         dm = np.asarray(self.mf.make_rdm1())
         if dm.ndim == 3:
@@ -496,7 +515,7 @@ class CMF(lib.StreamObject):
         self.set_Cdoc(Crest[:, :ndoc])
         self.set_Cact(X[:, idx_act], clusters, fspace)
         self.set_Cvir(Crest[:, ndoc:])
-        self._ao_clusters = (ao_labels, fspace, method)
+        self._ao_clusters = (ao_labels, fspace, method, guess)
 
     def get_init_guess_rdm1(self) -> list[np.ndarray]:
         """
@@ -1241,6 +1260,53 @@ class CMF(lib.StreamObject):
                  nact=np.int64(len(orbs)),
                  e_cmf=np.float64(self.e_tot),
                  e_states=np.asarray(e_states, dtype=float))
+
+
+def _overlap_partition(blocks, Pv, S, n):
+    """
+    Rotate within each orbital block (columns: orbitals) so that the orbitals overlap most with the span of the AO
+    columns Pv, and return, per block, the n orbitals with the largest overlaps over all blocks and the others
+    """
+    A = Pv @ np.linalg.inv(scipy.linalg.sqrtm(Pv.T @ S @ Pv)).real        # orthonormal basis of span(Pv)
+    svals, rot, which = [], [], []
+    for b, C in enumerate(blocks):
+        sv = np.zeros(C.shape[1])
+        if C.shape[1] > 0:
+            _, s, vt = np.linalg.svd(A.T @ S @ C, full_matrices=True)
+            sv[:len(s)] = s
+            C = C @ vt.T
+        svals.append(sv)
+        rot.append(C)
+        which += [b] * C.shape[1]
+    svals, rot, which = np.concatenate(svals), np.hstack(rot), np.array(which)
+    order = np.argsort(-svals, kind='stable')
+    act, rest = order[:n], order[n:]
+    return ([rot[:, act[which[act] == b]] for b in range(len(blocks))],
+            [rot[:, rest[which[rest] == b]] for b in range(len(blocks))])
+
+
+def _spade_clusters(mf, S, idx_act, idx_clusters, nelec_act):
+    """
+    Doubly occupied orbitals, active orbitals of each cluster and virtual orbitals from the mean-field orbitals by
+    overlap with the AOs of the clusters (SPADE): see `CMF.set_clusters_from_ao(guess='spade')`
+    """
+    mo, occ = np.asarray(mf.mo_coeff), np.asarray(mf.mo_occ)
+    if mo.ndim != 2:
+        raise NotImplementedError("guess='spade' needs restricted (RHF or ROHF) orbitals")
+    blocks = [mo[:, abs(occ - k) < 1e-8] for k in (2, 1, 0)]
+    I = np.eye(mo.shape[0])
+    act, env = _overlap_partition(blocks, I[:, idx_act], S, len(idx_act))
+    if env[1].shape[1] > 0:
+        raise ValueError('the clusters do not contain all singly occupied orbitals of the mean field')
+    n_mf = 2*act[0].shape[1] + act[1].shape[1]
+    if n_mf != nelec_act:
+        raise ValueError('the mean-field orbitals of the clusters hold %d electrons, fspace has %d' % (n_mf, nelec_act))
+    frags = [np.hstack(_overlap_partition(act, I[:, idx], S, len(idx))[0]) for idx in idx_clusters]
+    C = np.hstack(frags)
+    e, u = np.linalg.eigh(C.T @ S @ C)
+    C = C @ (u * e**-.5) @ u.T                                              # symmetric orthonormalization
+    offsets = np.cumsum([0] + [len(idx) for idx in idx_clusters])
+    return env[0], [C[:, offsets[i]:offsets[i+1]] for i in range(len(idx_clusters))], env[2]
 
 
 def _search_ao(mol, label:str) -> list:

@@ -7,7 +7,10 @@
     nevpt2  cMF-NEVPT2 correlation energy of the environment (frozen core), for the total energy
 
 Default active space, as the 38-orbital TPSCI space of github.com/arnab82/cMF_data: Cr 3d+4d (10 orbitals, three
-electrons, antiparallel M_s) and the 2p+3p of the three bridging O (6 orbitals, closed shell): (24e, 38o).
+electrons, antiparallel M_s) and the 2p+3p of the three bridging O (6 orbitals, closed shell): (24e, 38o). The
+clusters are meta-Lowdin orthogonalized AOs (orthonormal, any shells can be added with --cr-shells/--o-shells); the
+orbital optimization then moves the bonding character that the doubly occupied orbitals lack at the start (the first
+cMF energy is a few Eh above the ROHF). --guess spade starts from ROHF orbitals projected on the AOs instead.
 
     python cr2_pantazis_ao.py --steps scf,cmf,qdpt2,pdft,nevpt2
     python cr2_pantazis_ao.py --steps qdpt2,pdft --bridges          # reuses rohf.chk and cmf_orbitals.npy
@@ -44,6 +47,9 @@ p.add_argument('--o-shells', nargs='+', default=['2p', '3p'])
 p.add_argument('--geometry', default=os.path.join(here, 'data', 'cr2_pantazis.xyz'))
 p.add_argument('--max-memory', type=int, default=16000, help='MB')
 p.add_argument('--conv-tol-grad', type=float, default=1e-5, help='orbital gradient of ooCMF')
+p.add_argument('--guess', default='ao', choices=['ao', 'spade'],
+               help='cluster orbitals: the orthogonalized AOs themselves (ao), or the ROHF orbitals projected on them '
+                    '(spade, a start closer to the optimized cMF)')
 p.add_argument('--grids-level', type=int, default=3)
 p.add_argument('--bridges', action='store_true', help='add the Cr-O-Cr triples to QDPT2 and PDFT')
 p.add_argument('--max-det', type=float, default=2e7, help='largest determinant space of a QDPT2 subset')
@@ -84,7 +90,7 @@ labels = [['0 Cr %s' % s for s in args.cr_shells], ['1 Cr %s' % s for s in args.
 labels += [['%d O %s' % (ia, s) for s in args.o_shells] for ia in (2, 3, 4)]
 fspace = [(3, 0), (0, 3), (3, 3), (3, 3), (3, 3)]
 cmf = pycmf.CMF(mf)
-cmf.set_clusters_from_ao(labels, fspace)
+cmf.set_clusters_from_ao(labels, fspace, guess=args.guess)
 nact = cmf.Cact.shape[1]
 log('active space: (%de, %do), clusters %s, %d doubly occupied, %d virtual' % (
     sum(map(sum, fspace)), nact, [len(c) for c in cmf.clusters], cmf.Cdoc.shape[1], cmf.Cvir.shape[1]))

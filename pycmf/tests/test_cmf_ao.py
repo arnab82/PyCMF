@@ -274,3 +274,21 @@ def test_ao_labels_exact_atom():
     cmf = pycmf.CMF(scf.RHF(mol).run())
     cmf.set_clusters_from_ao([['%d C 2pz' % (2*a) for a in range(k, k + 2)] for k in range(0, 12, 2)], [(1, 1)] * 6)
     assert [len(c) for c in cmf.clusters] == [2] * 6
+
+
+def test_spade_guess():
+    """
+    Clusters with correlating shells (2p + 3p): the SPADE guess (mean-field orbitals projected on the cluster AOs)
+    starts closer to the optimized cMF than the bare AOs, and both reach the same energy
+    """
+    mol = gto.M(atom='N 0 0 0; N 0 0 2.5', basis='6-31g', spin=6, verbose=0)
+    mf = scf.ROHF(mol).run(conv_tol=1e-12)
+    out = {}
+    for guess in ('ao', 'spade'):
+        cmf = pycmf.CMF(mf)
+        cmf.set_clusters_from_ao([['0 N 2p', '0 N 3p'], ['1 N 2p', '1 N 3p']], [(3, 0), (0, 3)], guess=guess)
+        C = np.hstack((cmf.Cdoc, cmf.Cact, cmf.Cvir))
+        assert abs(C.T @ cmf.S @ C - np.eye(C.shape[1])).max() < 1e-10
+        out[guess] = (cmf.cmf_ci(), cmf.kernel())
+    assert abs(out['ao'][1] - out['spade'][1]) < 1e-7
+    assert out['spade'][0] - out['spade'][1] < out['ao'][0] - out['ao'][1]
