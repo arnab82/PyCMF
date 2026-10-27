@@ -227,6 +227,45 @@ e, inc, dm1, dm1_ao = cmf.pt2_mbe(order=3, cutoff=6.0, with_rdm=True)   # spin-s
 For H₄ in two clusters the largest error of the active 1RDM with respect to FCI drops from 0.11 (cMF) to 0.08.
 The NEVPT2 correction is not included in these densities.
 
+### Nuclear gradients and geometry optimization
+
+Orbital-optimized cMF is variational in all its parameters (each cluster state is an eigenvector of its embedded
+Hamiltonian, and all non-redundant orbital rotations are optimized), so its nuclear gradient needs no response
+equations, as for CASSCF:
+
+```python
+g = cmf.nuc_grad()                               # (natm, 3), Hartree/Bohr
+from pyscf.geomopt import berny_solver           # or geometric_solver
+mol_eq = berny_solver.optimize(cmf)              # needs set_clusters_from_ao
+```
+
+The mean-field part is J/K derivative builds and the intra-cluster part uses each cluster's own 2RDM, with exact or
+density-fitted integrals (including the auxiliary-basis response). For `state_average_` it is the gradient of the
+averaged energy. At each new geometry the optimizer's scanner reruns the SCF, rebuilds the clusters from the same AO
+labels and starts the orbital optimization from the previous orbitals. Tested against CASSCF (one cluster) and finite
+differences (RO-cMF with antiferromagnetic clusters, density fitting, state averaging: agreement to 1e-8 Eh/Bohr).
+Frozen orbitals (`set_Cfrz`) are not supported, since they would need their orbital response.
+
+### Pair-density functional theory (cMF-PDFT)
+
+`pycmf.pdft` evaluates MC-PDFT, E = V_nn + tr(D h) + ½ tr(D J[D]) + E_ot[ρ, Π], with the density and on-top pair
+density of a cMF state and the on-top functionals of `pyscf.mcpdft` (tPBE, ftPBE, tBLYP, ...). With one cluster it is
+MC-PDFT of CASCI (tested). For the spin-coupled states of open-shell clusters the 2RDM is known in closed form (the
+exchange between clusters I and J is scaled by ⟨S_I·S_J⟩, through the spin density of each cluster), so no
+determinant space is needed and `pdft.spin_ladder(cmf)` gives the PDFT spin ladder and J for any active space.
+These states have no charge-transfer configurations, however, and so no kinetic exchange: their PDFT J comes out
+ferromagnetic. The QDPT2 first-order wave function has them, and its PDFT J follows MC-PDFT on the full CASCI:
+
+```python
+res = cmf.qdpt2([0, 1], with_rdm=True)
+energies, j = pdft.qdpt2_spin_ladder(cmf, res, order=1, otxc='tPBE')   # E(S) and J (Hartree), H = -2J S_A.S_B
+```
+
+| J (cm⁻¹), two S = 3/2 N atoms, 6-31G | CASCI | QDPT2 | MC-PDFT (CASCI) | cMF-PDFT, spin-coupled states | cMF-PDFT, QDPT2 first order |
+| --- | --- | --- | --- | --- | --- |
+| 2.5 Å | -190 | -186 | -270 | +74 | -257 |
+| 2.0 Å | -1149 | -1046 | -1602 | +208 | -1353 |
+
 ### Large systems
 
 Per energy evaluation (one orbital step) the AO work is fixed, independent of the number of clusters

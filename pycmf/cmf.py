@@ -78,6 +78,7 @@ class CMF(lib.StreamObject):
         self.sa_states = None
         self.e_states = None
         self._state = 0
+        self._ao_clusters = None    # arguments of set_clusters_from_ao, to rebuild the clusters at a new geometry
 
     def set_Cfrz(self, C:np.ndarray):
         """Define the frozen orbitals which are not optimized. 
@@ -132,6 +133,7 @@ class CMF(lib.StreamObject):
         self.sa_states = None
         self.e_states = None
         self._state = 0
+        self._ao_clusters = None
 
     def state_average_(self, fspaces:list[list[tuple[int,int]]], weights=None):
         """Optimize the orbitals for the weighted average energy of several product states.
@@ -491,6 +493,7 @@ class CMF(lib.StreamObject):
         self.set_Cdoc(Crest[:, :ndoc])
         self.set_Cact(X[:, idx_act], clusters, fspace)
         self.set_Cvir(Crest[:, ndoc:])
+        self._ao_clusters = (ao_labels, fspace, method)
 
     def get_init_guess_rdm1(self) -> list[np.ndarray]:
         """
@@ -1156,6 +1159,20 @@ class CMF(lib.StreamObject):
         """
         from .mrpt import nevpt2_mbe
         return nevpt2_mbe(self, order, cutoff, **kwargs)
+
+    def nuc_grad(self, atmlst=None, verbose=None) -> np.ndarray:
+        """Analytic nuclear gradient (natm, 3) of the orbital-optimized cMF energy (state average for
+        `state_average_`), see `pycmf.grad`
+        """
+        from .grad import kernel
+        return kernel(self, atmlst, verbose)
+
+    def nuc_grad_method(self):
+        """`pycmf.grad.Gradients` object; `nuc_grad_method().as_scanner()` gives energies and gradients at new
+        geometries, so that `pyscf.geomopt` optimizers accept the `CMF` object
+        """
+        from .grad import Gradients
+        return Gradients(self)
 
     def export_fermicg(self, filename:str, clusters=None) -> None:
         """
