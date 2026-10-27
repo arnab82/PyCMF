@@ -34,6 +34,10 @@ cmf.analyze()
 Orbitals are given as AO coefficients: `set_Cfrz` (frozen core, not optimized), `set_Cdoc` (doubly occupied),
 `set_Cact` (clusters) and `set_Cvir` (virtual).
 
+[`tutorial.ipynb`](tutorial.ipynb) walks through all functions on small molecules: clusters from atomic orbitals,
+RO-cMF, state averaging, RDMs and properties, QDPT2 (with its RDMs and the many-body expansion), cMF-NEVPT2, the
+FermiCG export, nuclear gradients and geometry optimization, and cMF-PDFT.
+
 ### cMF in the AO basis
 
 Everything that couples different clusters, and the doubly occupied core, is a mean-field interaction.

@@ -864,6 +864,9 @@ class CMF(lib.StreamObject):
                 e_new, g_new = energy_and_grad(x + alpha*step)
                 if e_new <= e + 1e-4 * alpha * np.dot(g, step):
                     break
+                # a predicted decrease below the numerical precision of the energy: judge the step by the gradient
+                if abs(alpha * np.dot(g, step)) < 1e-11 * max(1, abs(e)) and np.linalg.norm(g_new) < np.linalg.norm(g):
+                    break
                 alpha *= .5
             else:
                 if not s_hist:
