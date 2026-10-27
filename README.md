@@ -15,6 +15,27 @@ This package does cMF directly on top of a PySCF mean-field object, in the AO ba
 restricted open-shell cMF (RO-cMF, [Bachhar & Mayhall, J. Phys. Chem. A 2024](https://pubs.acs.org/doi/10.1021/acs.jpca.4c03914))
 for open-shell clusters. It reproduces the energies of [ClusterMeanField.jl](https://github.com/nmayhall-vt/ClusterMeanField.jl).
 
+### Installation
+
+PyCMF is pure Python (nothing to compile); it needs Python ≥ 3.9 and PySCF, which brings NumPy and SciPy.
+
+```bash
+git clone https://github.com/arnab82/PyCMF.git
+cd PyCMF
+python -m venv .venv && source .venv/bin/activate      # or: conda create -n pycmf python=3.12 && conda activate pycmf
+pip install -e .                                         # editable install from the git checkout (sets the version)
+pytest -q pycmf/tests                                    # optional, about 15 minutes on 4 cores
+```
+
+Tested with Python 3.13 and PySCF 2.14. Optional extras:
+
+* cMF-PDFT uses `pyscf.mcpdft`, which recent PySCF includes; with an older PySCF, `pip install pyscf-forge`.
+* Geometry optimization: `pip install pyberny` (or geomeTRIC).
+* The tutorial: `pip install jupyter`, then `jupyter notebook tutorial.ipynb`.
+* PDFT on TPSCI wave functions: Julia with [TPSChem.jl](https://github.com/arnab82/TPSChem.jl), for `examples/tpsci_rdms.jl`.
+* Large systems: set `OMP_NUM_THREADS` to the cores of the node and `mol.max_memory` (MB) to what the density-fitting
+  integrals need.
+
 ### Quick start
 
 ```python
