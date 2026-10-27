@@ -151,10 +151,27 @@ e, increments = cmf.pair_pt2(cutoff=6.0)    # pair-additive PT2 for large system
 | N···N 2.5 Å, two S = 3/2 clusters: J | -186 cm⁻¹ | -190 cm⁻¹ |
 | N···N 2.0 Å: J | -1046 cm⁻¹ | -1149 cm⁻¹ |
 | (H₂)₂⁺ 3 Å, hopping splitting | 16.03 mEh | 16.03 mEh |
-| H₆, three clusters: correlation recovered | 60 % (pairs only: 54 %) | 100 % |
+| H₆, three clusters: correlation recovered | 64 % (pairs only: 58 %) | 100 % |
 
 The couplings are projected on the eigenstates of each cluster, so clusters need to be small enough to diagonalize
 (about 8 orbitals); larger clusters use an iterative solver with the embedded-cluster H0 (`partition='cmf'`).
+
+### Dynamic correlation of the environment (cMF-NEVPT2)
+
+`cmf.nevpt2()` adds strongly contracted NEVPT2 for the excitations involving the doubly occupied and virtual
+orbitals. The zeroth-order Hamiltonian is Dyall's, with its active part replaced by the sum of the embedded cluster
+Hamiltonians, which has the cMF state as an eigenfunction (as NEVPT2 requires) and is the same H0 as in `qdpt2`.
+So the two corrections do not overlap:
+
+    E = E_cMF + (QDPT2 energy - E_cMF)  +  E_NEVPT2
+        clusters  correlation between clusters  environment
+
+For open-shell clusters the reference is the RO-cMF Ms ensemble (`spin_average=True`, default). The energy
+expressions are those of `pyscf.mrpt.nevpt2`: with one cluster, cMF-NEVPT2 is SC-NEVPT2 of CASCI (tested), and two
+separated molecules give twice the energy of one (tested). Frozen orbitals (`set_Cfrz`) are not correlated, and with
+density fitting the core-core/virtual-virtual class is computed from the 3-index integrals, so (ia|jb) is never stored
+(it would be (n_core n_virt)^2, about 290 GB for the Fe₂ complex). The active-space RDMs of the cMF state are built in
+the determinant space of the active orbitals, so the active space has to be moderate (about 12 orbitals).
 
 ### RDMs and properties
 
@@ -185,6 +202,19 @@ Use density fitting, `mf = scf.RHF(mol).density_fit()`. Its 3-index integrals, `
 for a 200-atom organic molecule that is about 9 GB in STO-3G, 30 GB in 6-31G and 90-140 GB in def2-SVP
 (`weigend` or `def2-universal-jkfit`). Without density fitting, one direct J/K build for the 1116-AO Fe₂ complex
 takes about 12 minutes on 4 cores.
+
+Measured on 4 cores (15 GB): all-trans polyene C₁₀₀H₁₀₂ (202 atoms, STO-3G, 602 AOs, `weigend` density fitting),
+the π system split into 25 clusters of 4 orbitals, i.e. a 100-orbital active space with 301 doubly occupied and
+201 virtual orbitals (115,501 orbital rotations):
+
+| step | time |
+| --- | --- |
+| RHF | 530 s |
+| CMF-CI at the initial orbitals (core J/K, (aa|aa), all sweeps) | 49 s |
+| one orbital step (energy + gradient) | 162 s, about 80 % in the two J/K builds |
+| orbital optimization to \|g\| < 1e-5 | 30 iterations, 39 evaluations, 1.8 h |
+
+The energy was converged to 1e-6 Eh after 11 iterations. On a node with more cores the J/K builds scale down accordingly.
 
 ### Copyright
 

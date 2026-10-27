@@ -1,5 +1,6 @@
 """
-cMF for the Fe2(mu-H)2 complex in arnab82/Mixed_Valence_bimetallics (Fe2_mixed_jeremy), then export for TPSCI.
+cMF for the Fe2(mu-H)2 complex in arnab82/Mixed_Valence_bimetallics (Fe2_mixed_jeremy), with QDPT2 between the two Fe
+and NEVPT2 for the dynamic correlation of the ligands, and an export for TPSCI.
 
 The UHF solution there is broken symmetry and spin contaminated (<S^2> = 12.6 for M_s = 0) with
 alternating spin density on the ligand carbons, so localizing its orbitals onto the two Fe is ill defined.
@@ -45,7 +46,18 @@ cmf.kernel()
 for k in range(len(fspaces)):
     cmf.select_state(k)
     cmf.analyze()
-
 cmf.select_state(0)
+
+# Hopping and spin coupling between the two Fe: model space = both valence-trapped configurations and all their
+# Ms components, everything else to second order
+res = cmf.qdpt2()
+for e, s in zip(res.energies, res.spins):
+    print(" QDPT2  E = %16.10f  S = %.1f" % (e, s))
+
+# Dynamic correlation of the doubly occupied and virtual orbitals (here for the first configuration);
+# freeze the cores with set_Cfrz before kernel() to make this cheaper
+e_nevpt2, parts = cmf.nevpt2()
+print(" E(cMF) + QDPT2 + NEVPT2 (ground state) = %16.10f" % (res.energies[0] + e_nevpt2))
+
 cmf.export_fermicg('fe2_cmf.npz')
 molden.from_mo(mol, 'fe2_cmf.molden', cmf.mo_coeff)

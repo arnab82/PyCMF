@@ -1135,6 +1135,13 @@ class CMF(lib.StreamObject):
         from .pt2 import pair_pt2
         return pair_pt2(self, pairs, cutoff, **kwargs)
 
+    def nevpt2(self, spin_average=True, **kwargs):
+        """SC-NEVPT2 dynamic correlation (doubly occupied and virtual orbitals) of the current state,
+        see `pycmf.mrpt.nevpt2`
+        """
+        from .mrpt import nevpt2
+        return nevpt2(self, spin_average, **kwargs)
+
     def export_fermicg(self, filename:str, clusters=None) -> None:
         """
         Write the active-space problem for post-cMF methods in FermiCG.jl (TPSCI, BST, PT2) to an npz file.
