@@ -56,16 +56,16 @@ cmf.set_Cact(np.hstack(op.sym_ortho(Cfrags, S)), clusters, fspace)
 cmf.set_Cvir(np.zeros((mol.nao, 0)))
 print('cMF %.10f  (cmf.jl, exact integrals: -3343.929813602433)' % cmf.kernel())
 
+np.save('cr2_cmf_orbitals.npy', cmf.get_mo_coeffs())
+
 ots = {x: pdft.make_ot(mol, x, grids_level=3) for x in ('tPBE', 'ftPBE')}
 for x, ot in ots.items():
-    print('spin-coupled cMF states, %s: J = %.1f cm-1' % (x, pdft.spin_ladder(cmf, ot=ot)[1]*cm))
-rows = {}
-for sub in ([0, 1], [0, 2, 1], [0, 3, 1], [0, 4, 1]):
-    res = cmf.qdpt2(sub, with_rdm=True)
-    rows[tuple(sub)] = {'QDPT2': res.heisenberg_j()*cm}
-    for x, ot in ots.items():
-        rows[tuple(sub)]['PDFT-' + x] = pdft.qdpt2_spin_ladder(cmf, res, order=1, ot=ot)[1]*cm
-    print('clusters %-10s' % sub, '  '.join('J(%s) = %.1f' % kv for kv in rows[tuple(sub)].items()))
-pair = rows[(0, 1)]
-mbe = {key: pair[key] + sum(rows[t][key] - pair[key] for t in rows if len(t) == 3) for key in pair}
-print('pair + Cr-O-Cr triples:', '  '.join('J(%s) = %.1f' % kv for kv in mbe.items()))
+    print('spin-coupled cMF states, %s: J = %.1f cm-1' % (x, pdft.spin_ladder(cmf, ot=ot)[1]*cm), flush=True)
+
+# QDPT2 first-order RDMs of the spin states: the Cr-Cr pair alone, and expanded over the pair and the three
+# Cr-O-Cr triples; E_ot is evaluated once per spin state on the assembled RDMs
+for label, subsets in (('Cr-Cr pair', [(0, 1)]), ('pair + 3 Cr-O-Cr triples', [(0, 1), (0, 1, 2), (0, 1, 3), (0, 1, 4)])):
+    t = time.time()
+    rdms = pdft.mbe_rdm12(cmf, subsets, verbose=4)
+    js = {x: pdft.mbe_spin_ladder(cmf, ot=ot, rdms=rdms)[1]*cm for x, ot in ots.items()}
+    print('%-26s' % label, '  '.join('J(cMF-PDFT %s) = %.1f' % kv for kv in js.items()), ' (%.0f s)' % (time.time() - t), flush=True)

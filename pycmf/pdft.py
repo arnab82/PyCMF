@@ -305,3 +305,78 @@ def tpsci_spin_ladder(cmf, filename, clusters=None, otxc='tPBE', ot=None, grids_
     j_pdft = np.linalg.lstsq(a, [lowest[x][1] for x in s], rcond=None)[0][1]
     log.note('TPSCI J = %.3f cm-1   TPSCI-PDFT (%s) J = %.3f cm-1', j_ci*219474.6313705, ot.otxc, j_pdft*219474.6313705)
     return states, j_ci, j_pdft
+
+
+def mbe_rdm12(cmf, subsets, order=1, verbose=None, **kwargs) -> dict:
+    """
+    Active-space RDMs of the spin states from a many-body expansion over sets of clusters, e.g. the two magnetic
+    clusters and each magnetic-bridge-magnetic triple: for each total spin S, the RDMs of the lowest QDPT2 state of
+    spin S in each set (first-order wave function for order=1, embedded in the cMF states of the other clusters)
+    are combined as the sum of the increments RDM_T - (increments of the subsets of T in `subsets`). What this drops
+    are products of corrections on different sets (e.g. charge transfer on two bridges at once).
+
+    Parameters
+    ----------
+    subsets : list
+        Sets of clusters, each containing the magnetic clusters (and all its subsets in the list), e.g.
+        [(0, 1), (0, 1, 2), (0, 1, 3), (0, 1, 4)]
+    kwargs
+        Passed to `qdpt2`
+
+    Returns
+    -------
+    dict
+        S -> (dm1, dm2), spin-summed 1RDM and spin-free 2RDM of all active orbitals
+    """
+    from .pt2 import mbe_increments
+    log = logger.new_logger(cmf, verbose)
+    subsets = [tuple(sorted(x)) for x in subsets]
+    eri_act = cmf.get_active_eris()
+    vcore = cmf.get_core_veff()
+    rdms = {}
+    for sub in subsets:
+        res = cmf.qdpt2(list(sub), eri_act=eri_act, vcore=vcore, with_rdm=True, **kwargs)
+        lowest = {}
+        for k in np.argsort(res.energies):
+            lowest.setdefault(round(2*res.spins[k]) / 2, k)
+        rdms[sub] = {s: embed_rdm12(cmf, res.orbs, *res.make_rdm12(k, order)) for s, k in lowest.items()}
+        log.info('clusters %s: J(QDPT2) = %.3f cm-1', sub, res.heisenberg_j()*219474.6313705)
+    out = {}
+    for s in sorted(set.intersection(*[set(v) for v in rdms.values()])):
+        out[s] = tuple(sum(mbe_increments({t: rdms[t][s][x] for t in subsets}, subsets).values()) for x in (0, 1))
+    return out
+
+
+def mbe_spin_ladder(cmf, subsets=None, order=1, otxc='tPBE', ot=None, grids_level=None, rdms=None, verbose=None,
+                    **kwargs):
+    """
+    cMF-PDFT spin ladder with the RDMs, not the energies, expanded over sets of clusters (`mbe_rdm12`): E_ot is
+    evaluated once per spin state on the assembled density and on-top pair density, which treats the nonlinearity of
+    the functional exactly. Adding the J (or energy) increments of separate PDFT calculations would instead rely on
+    E_ot being linear in the changes of Pi.
+
+    Parameters
+    ----------
+    subsets : list
+        See `mbe_rdm12`
+    rdms : dict
+        Output of `mbe_rdm12`, to reuse it for several functionals
+
+    Returns
+    -------
+    energies : dict
+        S -> E(S)
+    j : float
+        J of H = -2J S_A.S_B (Hartree)
+    """
+    log = logger.new_logger(cmf, verbose)
+    if rdms is None:
+        rdms = mbe_rdm12(cmf, subsets, order, verbose, **kwargs)
+    if ot is None:
+        ot = make_ot(cmf.mol, otxc, grids_level)
+    energies = {s: energy(cmf, rdm12=rdm, ot=ot)[0] for s, rdm in rdms.items()}
+    s = np.array(sorted(energies))
+    e = np.array([energies[x] for x in s])
+    j = np.linalg.lstsq(np.vstack((np.ones_like(s), -s*(s+1))).T, e, rcond=None)[0][1]
+    log.note('cMF-PDFT (%s, RDM expansion) J = %.3f cm-1', ot.otxc, j*219474.6313705)
+    return energies, j

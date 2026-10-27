@@ -111,3 +111,22 @@ def test_tpsci_rdms(two_nitrogens, tmp_path):
         mc.kernel(C)
         assert abs(e_ci - mc.e_mcscf) < 1e-8
         assert abs(e_pdft - mc.e_tot) < 1e-6
+
+
+def test_rdm_expansion():
+    """
+    Two high-spin N atoms bridged by two Ne atoms: the PDFT spin ladder from the RDMs expanded over the N-N pair and the
+    two N-Ne-N triples is close to the one of QDPT2 on all four clusters, and with one triple it is that triple
+    """
+    mol = gto.M(atom='N 0 0 -1.5; N 0 0 1.5; Ne 1.3 0 0; Ne -1.3 0 0', basis='6-31g', spin=6, verbose=0)
+    mf = scf.ROHF(mol).run(conv_tol=1e-10)
+    cmf = pycmf.CMF(mf)
+    cmf.set_clusters_from_ao([['0 N 2p'], ['1 N 2p'], ['2 Ne 2p'], ['3 Ne 2p']], [(3, 0), (0, 3), (3, 3), (3, 3)])
+    cmf.kernel()
+    ot = pdft.make_ot(mol, 'tPBE', grids_level=2)
+    j_full = pdft.qdpt2_spin_ladder(cmf, cmf.qdpt2(with_rdm=True), ot=ot)[1]
+    j_mbe = pdft.mbe_spin_ladder(cmf, [(0, 1), (0, 1, 2), (0, 1, 3)], ot=ot)[1]
+    j_pair = pdft.mbe_spin_ladder(cmf, [(0, 1)], ot=ot)[1]
+    assert abs(j_mbe - j_full) < .02*abs(j_full) < abs(j_pair - j_full)
+    j_tri = pdft.qdpt2_spin_ladder(cmf, cmf.qdpt2([0, 1, 2], with_rdm=True), ot=ot)[1]
+    assert abs(pdft.mbe_spin_ladder(cmf, [(0, 1), (0, 1, 2)], ot=ot)[1] - j_tri) < 1e-10
