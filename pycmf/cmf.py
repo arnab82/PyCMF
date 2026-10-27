@@ -368,6 +368,8 @@ class CMF(lib.StreamObject):
         them at a cost proportional to the number of orbitals instead of the number of AOs
         """
         nmo = max(c.shape[1] for c in orbs)
+        if nmo == 0:
+            return np.zeros((len(orbs), self.nbas, self.nbas))
         mo_coeff = np.zeros((len(orbs), self.nbas, nmo))
         mo_occ = np.zeros((len(orbs), nmo))
         for i, (c, n) in enumerate(zip(orbs, occs)):

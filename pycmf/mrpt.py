@@ -102,21 +102,6 @@ def _sijrs(cmf, cache):
     return e
 
 
-def _veff(cmf, clusters, core=True):
-    """J - K/2 (AO) of the clusters `clusters` and, with `core`, of the frozen and doubly occupied orbitals, built
-    from orbitals and occupations so that density-fitted K is cheap
-    """
-    orbs, occs = [], []
-    if core:
-        orbs.append(np.hstack((cmf.Cfrz, cmf.Cdoc)))
-        occs.append(np.full(orbs[0].shape[1], 2.0))
-    for i in clusters:
-        c, n = cmf._cluster_natural_orbitals(i, cmf.cluster_1rdm[i])
-        orbs.append(c)
-        occs.append(n)
-    return cmf._get_veff([np.hstack(orbs)], [np.concatenate(occs)])[0]
-
-
 def _block_size(mc, n_per_index):
     """Number of indices of a loop over arrays with n_per_index elements per index: arrays of at most 64 MB (larger
     ones are slower), four of which fit in a quarter of the memory
@@ -233,12 +218,21 @@ def _prepare(cmf):
     which the integrals of every sub-problem are sliced
     """
     mf = cmf.mf
-    fock = mf.get_hcore() + _veff(cmf, range(len(cmf.clusters)))
+    # J - K/2 of each cluster and of the frozen and doubly occupied orbitals, in one J/K build from orbitals and
+    # occupations (cheap density-fitted K); the embedding of a sub-problem is the Fock matrix minus its clusters'
+    orbs, occs = map(list, zip(*[cmf._cluster_natural_orbitals(i, d) for i, d in enumerate(cmf.cluster_1rdm)]))
+    core = np.hstack((cmf.Cfrz, cmf.Cdoc))
+    if core.shape[1] > 0:
+        orbs.append(core)
+        occs.append(np.full(core.shape[1], 2.0))
+    veff = cmf._get_veff(orbs, occs)
+    fock = mf.get_hcore() + veff.sum(axis=0)
     e_core, u = np.linalg.eigh(cmf.Cdoc.T @ fock @ cmf.Cdoc)
     moc = cmf.Cdoc @ u
     e_vir, u = np.linalg.eigh(cmf.Cvir.T @ fock @ cmf.Cvir)
     mov = cmf.Cvir @ u
-    cache = {'fock': fock, 'moc': moc, 'e_core': e_core, 'mov': mov, 'e_vir': e_vir}
+    cache = {'fock': fock, 'moc': moc, 'e_core': e_core, 'mov': mov, 'e_vir': e_vir,
+             'veff_clusters': veff[:len(cmf.clusters)]}
     with_df = getattr(mf, 'with_df', None)
     if hasattr(with_df, 'loop'):
         Cact = cmf.Cact
@@ -337,7 +331,7 @@ def nevpt2(cmf, spin_average=True, max_states=64, clusters=None, with_sijrs=True
         eris = {'ppaa': cmf.ao2mo((mo, mo, Cact, Cact)),
                 'papa': cmf.ao2mo((mo, Cact, mo, Cact)),
                 'pacv': cmf.ao2mo((mo, Cact, moc, mov))}
-    eris['h1eff'] = mo.T @ (fock - _veff(cmf, clusters, core=False)) @ mo
+    eris['h1eff'] = mo.T @ (fock - cache['veff_clusters'][clusters].sum(axis=0)) @ mo
 
     # active part of H0: the embedded cluster Hamiltonians
     h1 = eris['h1eff'][ncore:nocc, ncore:nocc]

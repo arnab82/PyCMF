@@ -106,3 +106,24 @@ def test_many_body_expansion():
 
     e2_near, inc_near = cmf.nevpt2_mbe(order=2, cutoff=3.0)
     assert (0, 2) not in inc_near and (0, 1) in inc_near
+
+
+@pytest.mark.parametrize('density_fit', [False, True])
+def test_no_core(density_fit):
+    """
+    All electrons active (no doubly occupied orbitals): with two clusters the pair expansion is exact, and the
+    density-fitted integrals give the same energy
+    """
+    mol = gto.M(atom='H 0 0 0; H 0 0 1.0; H 0 0 2.5; H 0 0 3.5', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol)
+    if density_fit:
+        mf = mf.density_fit()
+    mf.run(conv_tol=1e-11)
+    cmf = pycmf.CMF(mf)
+    cmf.set_clusters_from_ao([['0 H 1s', '1 H 1s'], ['2 H 1s', '3 H 1s']], [(1, 1)] * 2)
+    cmf.conv_tol_rdm1 = 1e-12
+    cmf.cmf_ci()
+    assert cmf.Cdoc.shape[1] == 0
+    e = cmf.nevpt2()[0]
+    assert abs(cmf.nevpt2_mbe(order=2)[0] - e) < 1e-12
+    assert abs(e - (-0.0102)) < 1e-4
