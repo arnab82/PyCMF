@@ -72,7 +72,8 @@ cmf.kernel()
 The other orbitals are split into doubly occupied and virtual ones from the density of `mf`, and the orbital
 optimization relaxes everything. See `examples/mixed_valence_h4.py` (a toy mixed-valence system where ROHF delocalizes
 the charge and cMF localizes it) and `examples/fe2_mixed_valence.py` (an Fe₂(μ-H)₂ complex). The coupling between
-the charge-localized (or spin-coupled) cluster states is intercluster correlation, left to post-cMF methods.
+the charge-localized (or spin-coupled) cluster states is intercluster correlation, see `qdpt2` below or the export
+to FermiCG.jl.
 
 ### State averaging (mixed valence)
 
@@ -220,7 +221,7 @@ the π system split into 25 clusters of 4 orbitals, i.e. a 100-orbital active sp
 | step | time |
 | --- | --- |
 | RHF | 530 s |
-| CMF-CI at the initial orbitals (core J/K, (aa|aa), all sweeps) | 49 s |
+| CMF-CI at the initial orbitals (core J/K, (aa\|aa), all sweeps) | 49 s |
 | one orbital step (energy + gradient) | 162 s, about 80 % in the two J/K builds |
 | orbital optimization to \|g\| < 1e-5 | 30 iterations, 39 evaluations, 1.8 h |
 
