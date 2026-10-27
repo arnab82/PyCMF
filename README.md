@@ -27,7 +27,8 @@ pip install -e .                                         # editable install from
 pytest -q pycmf/tests                                    # optional, about 15 minutes on 4 cores
 ```
 
-Tested with Python 3.13 and PySCF 2.14. Optional extras:
+Without `pip install`, running from the repository directory (e.g. `tutorial.ipynb`) also works once PySCF is installed;
+the version then reads `0+unknown`. Tested with Python 3.13 and PySCF 2.14. Optional extras:
 
 * cMF-PDFT uses `pyscf.mcpdft`, which recent PySCF includes; with an older PySCF, `pip install pyscf-forge`.
 * Geometry optimization: `pip install pyberny` (or geomeTRIC).

@@ -12,4 +12,7 @@ from .mrpt import nevpt2, nevpt2_mbe
 from . import grad, pdft
 
 
-from ._version import __version__
+try:
+    from ._version import __version__
+except ImportError:     # source checkout used without installation; `pip install -e .` writes _version.py
+    __version__ = '0+unknown'
