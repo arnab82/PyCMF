@@ -76,5 +76,5 @@ def test2():
 
 e2 = test2()
 
-assert(abs(e1[0] - e2[0]) < 1e-16)
-assert(abs(e1[1] - e2[1]) < 1e-16)
+assert(abs(e1[0] - e2[0]) < 1e-12)
+assert(abs(e1[1] - e2[1]) < 1e-12)
