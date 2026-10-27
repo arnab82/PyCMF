@@ -76,16 +76,19 @@ def _sijrs(cmf, cache):
     if ncore == 0 or nvir == 0:
         return 0.0
     if 'Lcv' in cache:
-        lov = cache['Lcv']
-        ovov = lambda i: lib.einsum('La,Ljb->jab', lov[:, i], lov)
+        lov = cache['Lcv'].reshape(-1, ncore*nvir)
+        ovov = lambda i0, i1: np.dot(lov[:, i0*nvir:i1*nvir].T, lov[:, :i1*nvir]).reshape(i1-i0, nvir, i1, nvir)
     else:
-        g = cmf.ao2mo((moc, mov, moc, mov))
-        ovov = lambda i: g[i].transpose(1, 0, 2)
+        eri = cmf.ao2mo((moc, mov, moc, mov))
+        ovov = lambda i0, i1: eri[i0:i1, :, :i1]
     e = 0.0
-    for i in range(ncore):
-        gi = ovov(i)                                  # (ia|jb) as [j, a, b]
-        denom = e_core[i] + e_core[:, None, None] - e_vir[None, :, None] - e_vir[None, None, :]
-        e += np.einsum('jab,jab', gi / denom, 2*gi - gi.transpose(0, 2, 1))
+    blksize = max(1, int(cmf.mf.max_memory*.25e6/8/(4*ncore*nvir*nvir)))
+    for i0, i1 in lib.prange(0, ncore, blksize):
+        g = ovov(i0, i1).transpose(0, 2, 1, 3)        # (ia|jb) as [i, j, a, b] for j < i1
+        denom = (e_core[i0:i1, None, None, None] + e_core[None, :i1, None, None]) - (e_vir[:, None] + e_vir)
+        i, j = np.arange(i0, i1)[:, None], np.arange(i1)
+        fac = 2.0*(j < i) + 1.0*(j == i)              # (ia|jb) and (ja|ib) give the same term
+        e += np.einsum('ij,ijab,ijab', fac, g / denom, 2*g - g.transpose(0, 1, 3, 2))
     return e
 
 
@@ -104,15 +107,6 @@ def _veff(cmf, clusters, core=True):
     return cmf._get_veff([np.hstack(orbs)], [np.concatenate(occs)])[0]
 
 
-def _pacv(eris, p, c=slice(None), v=slice(None)):
-    """(p t|i a) for the orbitals p, all active t, core i in c and virtual a in v, from the stored integrals or
-    from the three-index ones
-    """
-    if 'pacv' in eris:
-        return eris['pacv'][p, :, c, v]
-    return lib.einsum('Lpt,Lia->ptia', eris['Lpa'][:, p], eris['Lcv'][:, c, v])
-
-
 def _block_size(mc, n_per_index):
     """Number of indices of a loop whose arrays have n_per_index elements per index, to fit in a quarter of the
     memory
@@ -121,7 +115,20 @@ def _block_size(mc, n_per_index):
 
 
 # Sijr, Srsi and Sir of pyscf.mrpt.nevpt2 (Apache License 2.0), with the contractions of three tensors done in
-# an optimized order; the expressions are unchanged
+# an optimized order and, for Sijr and Srsi, the (pt|ia) integrals formed in blocks of one index and laid out so that
+# the contractions are matrix products; the expressions are unchanged
+
+
+def _pair_sum(q, d):
+    """sum_p (2 q[b,m,n,p] - q[b,n,m,p]) sum_a q[b,m,n,a] d[p,a], symmetrized in (m, n), for m <= n
+    """
+    x = lib.dot(q.reshape(-1, q.shape[3]), d.T).reshape(q.shape)
+    out = np.einsum('bmnp,bmnp->bmn', 2*q - q.transpose(0, 2, 1, 3), x)
+    out += out.transpose(0, 2, 1)
+    m, n = np.triu_indices(q.shape[1])
+    out = out[:, m, n]
+    out[:, m == n] *= .5
+    return out
 
 
 def _sijr(mc, dms, eris):
@@ -133,21 +140,21 @@ def _sijr(mc, dms, eris):
     h2e = eris['ppaa'][ncore:nocc, ncore:nocc].transpose(0, 2, 1, 3)
     hdm1 = _nevpt2.make_hdm1(dm1)
     a3 = _nevpt2.make_a3(h1e, h2e, dm1, dm2, hdm1)
-    ci_diag = np.diag_indices(ncore)
-    ci_triu = np.triu_indices(ncore)
-
-    def pair_sum(h2e_v, d):
-        x = np.einsum('raji,pa->rpji', h2e_v, d, optimize=True)
-        out = 2.0*np.einsum('rpji,rpji->rji', h2e_v, x) - np.einsum('rpji,rpij->rji', h2e_v, x)
-        out += out.transpose(0, 2, 1)
-        out[:, ci_diag[0], ci_diag[1]] *= 0.5
-        return out[:, ci_triu[0], ci_triu[1]]
+    if 'pacv' in eris:
+        block = lambda r0, r1: np.ascontiguousarray(eris['pacv'][:ncore, :, :, r0:r1].transpose(3, 2, 0, 1))
+    else:
+        lcv = eris['Lcv']
+        naux = lcv.shape[0]
+        lca = np.ascontiguousarray(eris['Lpa'][:, :ncore]).reshape(naux, -1)
+        block = lambda r0, r1: lib.dot(np.ascontiguousarray(lcv[:, :, r0:r1].transpose(0, 2, 1)).reshape(naux, -1).T,
+                                       lca).reshape(r1-r0, ncore, ncore, ncas)
+    i, j = np.triu_indices(ncore)
+    e_c = mc.mo_energy[:ncore]
     e = 0.0
-    for r0, r1 in lib.prange(0, nvirt, _block_size(mc, 3*ncore*ncore*ncas)):
-        h2e_v = _pacv(eris, slice(0, ncore), v=slice(r0, r1)).transpose(3, 1, 2, 0)
-        e_r = mc.mo_energy[nocc+r0:nocc+r1]
-        diff = e_r[:, None, None] - mc.mo_energy[None, :ncore, None] - mc.mo_energy[None, None, :ncore]
-        e += _nevpt2._norm_to_energy(pair_sum(h2e_v, hdm1), pair_sum(h2e_v, a3), diff[:, ci_triu[0], ci_triu[1]])[1]
+    for r0, r1 in lib.prange(0, nvirt, _block_size(mc, 4*ncore*ncore*ncas)):
+        q = block(r0, r1)                                # (i a|j r) as [r, j, i, a]
+        diff = mc.mo_energy[nocc+r0:nocc+r1, None] - (e_c[i] + e_c[j])
+        e += _nevpt2._norm_to_energy(_pair_sum(q, hdm1), _pair_sum(q, a3), diff)[1]
     return e
 
 
@@ -159,20 +166,21 @@ def _srsi(mc, dms, eris):
     h1e = eris['h1eff'][ncore:nocc, ncore:nocc]
     h2e = eris['ppaa'][ncore:nocc, ncore:nocc].transpose(0, 2, 1, 3)
     k27 = _nevpt2.make_k27(h1e, h2e, dm1, dm2)
-    vi_diag = np.diag_indices(nvirt)
-    vi_triu = np.triu_indices(nvirt)
-
-    def pair_sum(h2e_v, d):
-        x = np.einsum('rsia,pa->rsip', h2e_v, d, optimize=True)
-        out = 2.0*np.einsum('rsip,rsip->rsi', h2e_v, x) - np.einsum('rsip,srip->rsi', h2e_v, x)
-        out += out.transpose(1, 0, 2)
-        out[vi_diag] *= 0.5
-        return out[vi_triu]
+    if 'pacv' in eris:
+        block = lambda i0, i1: np.ascontiguousarray(eris['pacv'][nocc:, :, i0:i1].transpose(2, 3, 0, 1))
+    else:
+        lcv = eris['Lcv']
+        naux = lcv.shape[0]
+        lva = np.ascontiguousarray(eris['Lpa'][:, nocc:]).reshape(naux, -1)
+        block = lambda i0, i1: lib.dot(np.ascontiguousarray(lcv[:, i0:i1]).reshape(naux, -1).T,
+                                       lva).reshape(i1-i0, nvirt, nvirt, ncas)
+    r, s = np.triu_indices(nvirt)
+    e_v = mc.mo_energy[nocc:]
     e = 0.0
-    for i0, i1 in lib.prange(0, ncore, _block_size(mc, 3*nvirt*nvirt*ncas)):
-        h2e_v = _pacv(eris, slice(nocc, None), c=slice(i0, i1)).transpose(3, 0, 2, 1)
-        diff = mc.mo_energy[nocc:, None, None] + mc.mo_energy[None, nocc:, None] - mc.mo_energy[None, None, i0:i1]
-        e += _nevpt2._norm_to_energy(pair_sum(h2e_v, dm1), pair_sum(h2e_v, k27), diff[vi_triu])[1]
+    for i0, i1 in lib.prange(0, ncore, _block_size(mc, 4*nvirt*nvirt*ncas)):
+        q = block(i0, i1)                                # (s a|i r) as [i, r, s, a]
+        diff = (e_v[r] + e_v[s]) - mc.mo_energy[i0:i1, None]
+        e += _nevpt2._norm_to_energy(_pair_sum(q, dm1), _pair_sum(q, k27), diff)[1]
     return e
 
 
@@ -240,7 +248,7 @@ def _df_eris(lpa, lcv, ncore, ncas):
     """
     The blocks of ppaa (pq|tu) and papa (pt|qu) that the NEVPT2 classes use, from (L|p t) and (L|i a); the
     core-core and virtual-virtual blocks of ppaa are not needed and left zero. The (pt|ia) are formed in blocks
-    by the classes that need them, `_pacv`
+    by the classes that need them, `_sijr` and `_srsi`
     """
     naux, nmo = lpa.shape[:2]
     nocc = ncore + ncas
