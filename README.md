@@ -283,6 +283,21 @@ The spin of each root comes from ⟨S²⟩ of its RDMs, and TPSChem's 2RDM conve
 reading. For the two N atoms, full-space RDMs in this format (the converged-TPSCI limit) give J = -269.59 cm⁻¹, the
 MC-PDFT value of the CASCI spin states (tested).
 
+[Cr₂(OH)₃(tmtacn)₂]³⁺ (Pantazis) in the 19-orbital model of [cMF_data](https://github.com/arnab82/cMF_data)
+(def2-SVP, two Cr 3d clusters and three bridging O 2p clusters from SPADE, environment frozen;
+`examples/cr2_pantazis_pdft.py`). The cMF energy is within 0.6 mEh of cmf.jl (density fitting here). J in cm⁻¹:
+
+| | Cr–Cr pair | + the three Cr–O–Cr triples |
+| --- | --- | --- |
+| cMF-PDFT, spin-coupled states (tPBE) | +8 | |
+| QDPT2 | -12.0 | -18.1 |
+| cMF-PDFT, QDPT2 first order, tPBE | -25.8 | -23.3 |
+| cMF-PDFT, QDPT2 first order, ftPBE | -26.7 | -23.1 |
+| TPSCI, 38 active orbitals (3d4d/2p3p, cMF_data, extrapolated) | -27 | |
+
+The bridges add to the wave-function J (expanded over the triples) and change the PDFT J little; cMF-PDFT in the small
+active space comes within about 4 cm⁻¹ of TPSCI in the large one.
+
 ### Large systems
 
 Per energy evaluation (one orbital step) the AO work is fixed, independent of the number of clusters
