@@ -1064,7 +1064,7 @@ class CMF(lib.StreamObject):
         dip = scf.hf.dip_moment(self.mol, dm[0] + dm[1], verbose=log)
         return pop_and_charges, dip
 
-    def get_active_hamiltonian(self, clusters=None, eri_act=None) -> (float, np.ndarray, np.ndarray, np.ndarray):
+    def get_active_hamiltonian(self, clusters=None, eri_act=None, vcore=None) -> (float, np.ndarray, np.ndarray, np.ndarray):
         """
         Active-space Hamiltonian of the clusters with indices `clusters` (default: all), in the current orbitals.
 
@@ -1088,9 +1088,10 @@ class CMF(lib.StreamObject):
         others = [j for j in range(len(self.clusters)) if j not in clusters]
         if eri_act is None:
             eri_act = self.get_active_eris()
+        if vcore is None:
+            vcore = self.get_core_veff()
 
         hcore = self.mf.get_hcore()
-        vcore = self.get_core_veff()
         h0 = self.mf.energy_nuc() + np.einsum('ij,ji->', self.get_core_dm(), hcore + .5*vcore)
         h_act = self.Cact.T @ (hcore + vcore) @ self.Cact
 
@@ -1121,6 +1122,18 @@ class CMF(lib.StreamObject):
         h1 = (h_act + v_env)[np.ix_(orbs, orbs)]
         h2 = eri_act[np.ix_(orbs, orbs, orbs, orbs)]
         return h0, h1, h2, orbs
+
+    def qdpt2(self, clusters=None, fspaces=None, **kwargs):
+        """Quasi-degenerate PT2 for a few clusters in the mean field of the others, see `pycmf.pt2.qdpt2`
+        """
+        from .pt2 import qdpt2
+        return qdpt2(self, clusters, fspaces, **kwargs)
+
+    def pair_pt2(self, pairs=None, cutoff=None, **kwargs):
+        """Pair-additive cMF-PT2 energy, see `pycmf.pt2.pair_pt2`
+        """
+        from .pt2 import pair_pt2
+        return pair_pt2(self, pairs, cutoff, **kwargs)
 
     def export_fermicg(self, filename:str, clusters=None) -> None:
         """

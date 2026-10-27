@@ -130,6 +130,32 @@ in that Hamiltonian, so anything solved on top of it gives the correlation withi
 are `fspace_states`, `weights`, `e_cmf`, `e_states`, `mo_coeff` (AO coefficients of [frozen, doubly occupied,
 active, virtual]) and `ncore`.
 
+### Perturbation theory between clusters (QDPT2)
+
+`cmf.qdpt2(clusters)` adds the correlation between a few clusters (default: all) in the mean field of the rest.
+Product states degenerate with the cMF reference in zeroth order form the model space: all Ms components of the
+cluster spin multiplets and, for `state_average_`, the other charge configurations. So spin coupling and electron
+hopping are treated exactly, and everything else (charge transfer, dispersion) to second order.
+The default Epstein-Nesbet denominators include the electron-hole attraction of charge-transfer states, which
+kinetic exchange needs.
+
+```python
+res = cmf.qdpt2([0, 1])             # e.g. the two metals
+res.energies, res.spins             # spin ladder (and mixed-valence states)
+res.heisenberg_j()                  # J of H = -2J S_A.S_B
+e, increments = cmf.pair_pt2(cutoff=6.0)    # pair-additive PT2 for large systems
+```
+
+| test (FCI over the same active orbitals) | QDPT2 | FCI |
+| --- | --- | --- |
+| N···N 2.5 Å, two S = 3/2 clusters: J | -186 cm⁻¹ | -190 cm⁻¹ |
+| N···N 2.0 Å: J | -1046 cm⁻¹ | -1149 cm⁻¹ |
+| (H₂)₂⁺ 3 Å, hopping splitting | 16.03 mEh | 16.03 mEh |
+| H₆, three clusters: correlation recovered | 60 % (pairs only: 54 %) | 100 % |
+
+The couplings are projected on the eigenstates of each cluster, so clusters need to be small enough to diagonalize
+(about 8 orbitals); larger clusters use an iterative solver with the embedded-cluster H0 (`partition='cmf'`).
+
 ### RDMs and properties
 
 | method | returns |
