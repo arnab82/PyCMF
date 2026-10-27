@@ -81,3 +81,33 @@ def test_exchange_coupling(two_nitrogens):
     j_cas = np.linalg.lstsq(np.vstack((np.ones(4), -s*(s+1))).T, ecas, rcond=None)[0][1]
     assert j_cas < 0 and j1 < 0 < j0
     assert abs(j1 - j_cas) < .1*abs(j_cas)
+
+
+def test_tpsci_rdms(two_nitrogens, tmp_path):
+    """
+    PDFT on TPSCI states read from the file of examples/tpsci_rdms.jl: with full-space RDMs (FCI, the converged TPSCI
+    limit, written in TPSChem's convention) it is MC-PDFT of the CASCI spin states over the same orbitals
+    """
+    mf, cmf = two_nitrogens
+    path = str(tmp_path / 'cmf.npz')
+    cmf.export_fermicg(path)
+    d = np.load(path)
+    n = d['h1'].shape[0]
+    e, ci = fci.direct_spin1.FCI().kernel(d['h1'], d['h2'], n, (3, 3), ecore=float(d['h0']), nroots=4, conv_tol=1e-12)
+    dm1, dm2 = np.zeros((n, n, 4)), np.zeros((n, n, n, n, 4))
+    for r in range(4):
+        a, b = fci.direct_spin1.make_rdm12(ci[r], n, (3, 3))
+        dm1[..., r], dm2[..., r] = a, b.transpose(0, 2, 1, 3)
+    np.savez(str(tmp_path / 'tpsci.npz'), energies=e, dm1=dm1, dm2=dm2)
+
+    ot = pdft.make_ot(cmf.mol, 'tPBE', grids_level=2)
+    states, j_ci, j_pdft = pdft.tpsci_spin_ladder(cmf, str(tmp_path / 'tpsci.npz'), ot=ot)
+    assert sorted(s for e_ci, s, e_pdft in states) == [0, 1, 2, 3]
+    C = np.hstack((cmf.Cdoc, cmf.Cact, cmf.Cvir))
+    for e_ci, s, e_pdft in states:
+        mc = mcpdft.CASCI(mf, 'tPBE', 6, (3, 3), grids_level=2)
+        mc.fcisolver = fci.addons.fix_spin_(mc.fcisolver, ss=s*(s+1))
+        mc.fcisolver.conv_tol = 1e-12
+        mc.kernel(C)
+        assert abs(e_ci - mc.e_mcscf) < 1e-8
+        assert abs(e_pdft - mc.e_tot) < 1e-6

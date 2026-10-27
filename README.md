@@ -270,6 +270,19 @@ energies, j = pdft.qdpt2_spin_ladder(cmf, res, order=1, otxc='tPBE')   # E(S) an
 | 2.5 Å | -190 | -186 | -270 | +74 | -257 |
 | 2.0 Å | -1149 | -1046 | -1602 | +208 | -1353 |
 
+PDFT on TPSCI wave functions ([TPSChem.jl](https://github.com/arnab82/TPSChem.jl)): export the cMF problem, run TPSCI
+for the spin states and write their RDMs with `examples/tpsci_rdms.jl`, then evaluate PDFT on each root:
+
+```python
+cmf.export_fermicg('cmf.npz')
+# julia --project=/path/to/TPSChem.jl -t auto examples/tpsci_rdms.jl cmf.npz tpsci_rdms.npz   (TPSCI_NROOTS=4 ...)
+states, j_tpsci, j_pdft = pdft.tpsci_spin_ladder(cmf, 'tpsci_rdms.npz', otxc='tPBE')   # (E_TPSCI, S, E_PDFT) per root
+```
+
+The spin of each root comes from ⟨S²⟩ of its RDMs, and TPSChem's 2RDM convention (Γ[p,q,r,s] = ⟨p†q†sr⟩) is converted on
+reading. For the two N atoms, full-space RDMs in this format (the converged-TPSCI limit) give J = -269.59 cm⁻¹, the
+MC-PDFT value of the CASCI spin states (tested).
+
 ### Large systems
 
 Per energy evaluation (one orbital step) the AO work is fixed, independent of the number of clusters

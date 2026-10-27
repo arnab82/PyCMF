@@ -247,3 +247,61 @@ def qdpt2_spin_ladder(cmf, res, order=1, otxc='tPBE', ot=None, grids_level=None,
     log.note('cMF-PDFT (%s, QDPT2 order %d) exchange coupling J = %.3f cm-1  (H = -2J S_A.S_B)', ot.otxc, order,
              j*219474.6313705)
     return energies, j
+
+
+def spin_square_rdm(dm1, dm2) -> float:
+    """<S^2> from the spin-summed 1RDM and the spin-free 2RDM (PySCF convention) of an active space
+    """
+    return .75*np.trace(dm1) - .5*np.einsum('pqqp', dm2) - .25*np.einsum('ppqq', dm2)
+
+
+def load_tpsci_rdms(filename):
+    """
+    Energies and RDMs of TPSCI states written by `examples/tpsci_rdms.jl` (TPSChem.jl): (R,), spin-summed 1RDMs
+    (R, n, n) and spin-free 2RDMs (R, n, n, n, n) converted to the PySCF convention, dm2[p,q,r,s] = <p+ r+ s q>
+    (TPSChem: G[p,q,r,s] = <p+ q+ s r>), in the orbital order of `CMF.export_fermicg`
+    """
+    d = np.load(filename)
+    e = np.asarray(d['energies'], dtype=float).ravel()
+    dm1 = np.moveaxis(np.asarray(d['dm1'], dtype=float), -1, 0)
+    dm2 = np.moveaxis(np.asarray(d['dm2'], dtype=float), -1, 0).transpose(0, 1, 3, 2, 4)
+    return e, dm1, dm2
+
+
+def tpsci_spin_ladder(cmf, filename, clusters=None, otxc='tPBE', ot=None, grids_level=None, verbose=None):
+    """
+    PDFT on TPSCI states: the RDMs of each root from `examples/tpsci_rdms.jl` (TPSChem.jl), run on
+    `cmf.export_fermicg(file, clusters)` with the same clusters, embedded in the cMF states of the other clusters
+
+    Returns
+    -------
+    states : list
+        (E_TPSCI, S, E_PDFT) of each root, S from <S^2> of its RDMs
+    j_tpsci, j_pdft : float
+        J of H = -2J S_A.S_B (Hartree) from the lowest root of each total spin, TPSCI and TPSCI-PDFT energies
+    """
+    log = logger.new_logger(cmf, verbose)
+    e_ci, dm1s, dm2s = load_tpsci_rdms(filename)
+    if clusters is None:
+        clusters = range(len(cmf.clusters))
+    orbs = np.concatenate([cmf.clusters[i] for i in clusters])
+    if dm1s.shape[1] != len(orbs):
+        raise ValueError('the RDMs have %d orbitals, the clusters %d' % (dm1s.shape[1], len(orbs)))
+    if ot is None:
+        ot = make_ot(cmf.mol, otxc, grids_level)
+    states = []
+    for r in range(len(e_ci)):
+        ss = spin_square_rdm(dm1s[r], dm2s[r])
+        s = round(np.sqrt(1 + 4*max(ss, 0)) - 1) / 2
+        e = energy(cmf, rdm12=embed_rdm12(cmf, orbs, dm1s[r], dm2s[r]), ot=ot)[0]
+        states.append((e_ci[r], s, e))
+        log.info('TPSCI root %d  E = %.10f  <S^2> = %.4f  E(%s) = %.10f', r, e_ci[r], ss, ot.otxc, e)
+    lowest = {}
+    for e_r, s, e_p in sorted(states):
+        lowest.setdefault(s, (e_r, e_p))
+    s = np.array(sorted(lowest))
+    a = np.vstack((np.ones_like(s), -s*(s+1))).T
+    j_ci = np.linalg.lstsq(a, [lowest[x][0] for x in s], rcond=None)[0][1]
+    j_pdft = np.linalg.lstsq(a, [lowest[x][1] for x in s], rcond=None)[0][1]
+    log.note('TPSCI J = %.3f cm-1   TPSCI-PDFT (%s) J = %.3f cm-1', j_ci*219474.6313705, ot.otxc, j_pdft*219474.6313705)
+    return states, j_ci, j_pdft
