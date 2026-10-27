@@ -1064,22 +1064,82 @@ class CMF(lib.StreamObject):
         dip = scf.hf.dip_moment(self.mol, dm[0] + dm[1], verbose=log)
         return pop_and_charges, dip
 
-    def export_fermicg(self, filename:str) -> None:
+    def get_active_hamiltonian(self, clusters=None, eri_act=None) -> (float, np.ndarray, np.ndarray, np.ndarray):
+        """
+        Active-space Hamiltonian of the clusters with indices `clusters` (default: all), in the current orbitals.
+
+        The frozen and doubly occupied orbitals, and the other clusters in their cMF states, are folded into
+        h0 and h1: h1 gets their J - K/2 and h0 their energy, with the exact intra-cluster energy of the other
+        clusters. So the cMF state of the selected clusters has the total cMF energy in this Hamiltonian, and
+        solving it exactly adds the correlation between them in the mean field of the rest.
+        With `state_average_` the other clusters enter with their state-averaged densities and energies.
+
+        Returns
+        -------
+        h0 : float
+        h1, h2 : np.ndarray
+            One- and two-electron integrals, (pq|rs), in the orbitals of the selected clusters
+        orbs : np.ndarray
+            Indices (columns of `Cact`) of these orbitals, cluster after cluster
+        """
+        if clusters is None:
+            clusters = range(len(self.clusters))
+        clusters = list(clusters)
+        others = [j for j in range(len(self.clusters)) if j not in clusters]
+        if eri_act is None:
+            eri_act = self.get_active_eris()
+
+        hcore = self.mf.get_hcore()
+        vcore = self.get_core_veff()
+        h0 = self.mf.energy_nuc() + np.einsum('ij,ji->', self.get_core_dm(), hcore + .5*vcore)
+        h_act = self.Cact.T @ (hcore + vcore) @ self.Cact
+
+        # 1RDMs and intra-cluster two-electron energies of the other clusters
+        rdm1s = {j: 0 for j in others}
+        e2 = {j: 0 for j in others}
+        for k, w in self._states():
+            if k is not None:
+                self.select_state(k)
+            for j in others:
+                cj = self.clusters[j]
+                rdm1s[j] = rdm1s[j] + w * self.cluster_1rdm[j]
+                e2[j] += w * .5*np.einsum('tuvw,tuvw->', eri_act[np.ix_(cj, cj, cj, cj)], self.cluster_2rdm[j])
+        if self.sa_states is not None:
+            self.select_state(0)
+
+        dm_env = np.zeros_like(h_act)
+        v_env = np.zeros_like(h_act)
+        for j in others:
+            idx = np.ix_(self.clusters[j], self.clusters[j])
+            vj = self._get_active_veff(j, rdm1s[j], eri_act)
+            dm_env[idx] = rdm1s[j]
+            v_env += vj
+            h0 += np.einsum('ij,ji->', rdm1s[j], h_act[idx]) + e2[j] - .5*np.einsum('ij,ji->', rdm1s[j], vj[idx])
+        h0 += .5*np.einsum('ij,ji->', dm_env, v_env)
+
+        orbs = np.asarray(sum([list(self.clusters[i]) for i in clusters], []), dtype=int)
+        h1 = (h_act + v_env)[np.ix_(orbs, orbs)]
+        h2 = eri_act[np.ix_(orbs, orbs, orbs, orbs)]
+        return h0, h1, h2, orbs
+
+    def export_fermicg(self, filename:str, clusters=None) -> None:
         """
         Write the active-space problem for post-cMF methods in FermiCG.jl (TPSCI, BST, PT2) to an npz file.
 
+        `clusters` selects a subset of the clusters (e.g. a pair, to get the coupling between two metals);
+        the other clusters are folded into the mean field, see `get_active_hamiltonian`.
         The active orbitals are reordered so that the orbitals of each cluster are contiguous. Keys:
 
-        h0, h1, h2      `InCoreInts` in the current orbitals: core energy (with nuclear repulsion),
-                        one-electron integrals dressed with J - K/2 of the frozen and doubly occupied
-                        orbitals, and (pq|rs)
-        cluster_index   cluster (1-based) of each active orbital
+        h0, h1, h2      `InCoreInts` in the current orbitals: energy of everything outside the selected
+                        clusters (with nuclear repulsion), one-electron integrals dressed with its J - K/2,
+                        and (pq|rs)
+        cluster_index   cluster (1-based, in the order of `clusters`) of each active orbital
         fspace          (nclusters, 2) alpha and beta electrons of each cluster, the reference `FockConfig`
         fspace_states   (nstates, nclusters, 2) and `weights` of the states, see `state_average_`
         rdm1a, rdm1b    active-space 1RDMs for embedding the cluster bases; each cluster is an Ms ensemble,
                         so they are equal, and they are averaged over the states
-        mo_coeff        AO coefficients of [frozen, doubly occupied, active (reordered), virtual]
-        ncore           number of frozen and doubly occupied orbitals
+        mo_coeff        AO coefficients of [frozen, doubly occupied, active (reordered), other clusters, virtual]
+        ncore, nact     number of frozen and doubly occupied orbitals, and of active orbitals
         e_cmf           CMF energy (state average), and `e_states`
 
         In Julia::
@@ -1093,15 +1153,12 @@ class CMF(lib.StreamObject):
         """
         if self.cluster_1rdm is None:
             raise RuntimeError('run cmf_ci or kernel first')
-        order = np.asarray(sum(self.clusters, []), dtype=int)
-        cluster_index = np.concatenate([np.full(len(ci), i+1) for i, ci in enumerate(self.clusters)])
-        Cact = self.Cact[:, order]
-
-        hcore = self.mf.get_hcore()
-        vcore = self.get_core_veff()
-        h0 = self.mf.energy_nuc() + np.einsum('ij,ji->', self.get_core_dm(), hcore + .5*vcore)
-        h1 = Cact.T @ (hcore + vcore) @ Cact
-        h2 = self.ao2mo((Cact,) * 4)
+        if clusters is None:
+            clusters = range(len(self.clusters))
+        clusters = list(clusters)
+        h0, h1, h2, orbs = self.get_active_hamiltonian(clusters)
+        others = [p for p in range(self.Cact.shape[1]) if p not in set(orbs)]
+        cluster_index = np.concatenate([np.full(len(self.clusters[i]), n+1) for n, i in enumerate(clusters)])
 
         dm1 = 0
         for k, w in self._states():
@@ -1113,16 +1170,17 @@ class CMF(lib.StreamObject):
         else:
             self.select_state(0)
             fspace_states, weights, e_states = [st['fspace'] for st in self.sa_states], self.sa_weights, self.e_states
-        dm1 = dm1[np.ix_(order, order)]
+        dm1 = dm1[np.ix_(orbs, orbs)]
 
         np.savez(filename, h0=np.float64(h0), h1=h1, h2=h2,
                  cluster_index=cluster_index.astype(np.int64),
-                 fspace=np.asarray(self.fspace, dtype=np.int64),
-                 fspace_states=np.asarray(fspace_states, dtype=np.int64),
+                 fspace=np.asarray([self.fspace[i] for i in clusters], dtype=np.int64),
+                 fspace_states=np.asarray([[f[i] for i in clusters] for f in fspace_states], dtype=np.int64),
                  weights=np.asarray(weights, dtype=float),
                  rdm1a=.5*dm1, rdm1b=.5*dm1,
-                 mo_coeff=np.hstack((self.Cfrz, self.Cdoc, Cact, self.Cvir)),
+                 mo_coeff=np.hstack((self.Cfrz, self.Cdoc, self.Cact[:, orbs], self.Cact[:, others], self.Cvir)),
                  ncore=np.int64(self.Cfrz.shape[1] + self.Cdoc.shape[1]),
+                 nact=np.int64(len(orbs)),
                  e_cmf=np.float64(self.e_tot),
                  e_states=np.asarray(e_states, dtype=float))
 

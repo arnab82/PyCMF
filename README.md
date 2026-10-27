@@ -121,6 +121,11 @@ ci_vector = FermiCG.add_spin_focksectors(ci_vector)
 e0, v0 = FermiCG.tpsci_ci(ci_vector, cluster_ops, clustered_ham, thresh_cipsi=1e-3, thresh_foi=1e-5, thresh_asci=-1)
 ```
 
+For large systems, export only the clusters that are strongly coupled, e.g. the two metals:
+`cmf.export_fermicg('pair.npz', clusters=[0, 1])` folds all other clusters, in their cMF states, into `h0` and `h1`
+(`get_active_hamiltonian` returns the same Hamiltonian in Python). The cMF state of the pair has the total cMF energy
+in that Hamiltonian, so anything solved on top of it gives the correlation within the pair in the field of the rest.
+
 `[1, 1]` lets each cluster gain or lose one electron, which the hopping between the metals needs. The other keys
 are `fspace_states`, `weights`, `e_cmf`, `e_states`, `mo_coeff` (AO coefficients of [frozen, doubly occupied,
 active, virtual]) and `ncore`.

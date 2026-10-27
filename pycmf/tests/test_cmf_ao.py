@@ -231,3 +231,26 @@ def test_export_fermicg(tmp_path):
     assert d['cluster_index'].tolist() == [1, 1, 1, 2, 2, 2]
     assert d['fspace'].tolist() == [[3, 0], [2, 1]]
     assert np.allclose(d['mo_coeff'][:, d['ncore']:d['ncore']+6], cmf.Cact[:, order])
+
+
+def test_export_subproblem(tmp_path):
+    """
+    A pair of clusters, with the third folded into the mean field: their cMF state has the total cMF energy
+    in the exported Hamiltonian, and FCI of the pair lowers it (correlation within the pair)
+    """
+    mol = gto.M(atom=[['H', (i, 0, 0)] for i in range(6)], basis='sto-3g', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    cmf = pycmf.CMF(mf)
+    cmf.set_Cact(cmf.lowdin(), [[0, 1], [2, 3], [4, 5]], [(1, 1)] * 3)
+    e = cmf.kernel()
+    d1, d2 = cmf.make_rdm12()
+    for pair in ([0, 1], [1, 2], [2, 0]):
+        cmf.export_fermicg(str(tmp_path / 'pair.npz'), clusters=pair)
+        d = np.load(tmp_path / 'pair.npz')
+        orbs = sum([cmf.clusters[i] for i in pair], [])
+        e_npz = (d['h0'] + np.einsum('pq,pq', d['h1'], d['rdm1a'] + d['rdm1b'])
+                 + .5*np.einsum('pqrs,pqrs', d['h2'], d2[np.ix_(orbs, orbs, orbs, orbs)]))
+        assert abs(e_npz - e) < 1e-10
+        assert d['nact'] == 4 and d['cluster_index'].tolist() == [1, 1, 2, 2]
+        e_pair = fci.direct_spin1.FCI().kernel(d['h1'], d['h2'], 4, (2, 2), ecore=float(d['h0']))[0]
+        assert e_pair < e - 1e-4
