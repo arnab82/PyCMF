@@ -287,7 +287,7 @@ MC-PDFT value of the CASCI spin states (tested).
 (def2-SVP, two Cr 3d clusters and three bridging O 2p clusters from SPADE, environment frozen;
 `examples/cr2_pantazis_pdft.py`). The cMF energy is within 0.6 mEh of cmf.jl (density fitting here). J in cm⁻¹:
 
-| | Cr–Cr pair | + the three Cr–O–Cr triples |
+| | Cr–Cr pair (O bridges in the mean field) | pair + bridge corrections |
 | --- | --- | --- |
 | cMF-PDFT, spin-coupled states (tPBE) | +8 | |
 | QDPT2 | -12.0 | -18.1 |
@@ -295,8 +295,12 @@ MC-PDFT value of the CASCI spin states (tested).
 | cMF-PDFT, QDPT2 first order, ftPBE | -26.7 | -23.1 |
 | TPSCI, 38 active orbitals (3d4d/2p3p, cMF_data, extrapolated) | -27 | |
 
-The bridges add to the wave-function J (expanded over the triples) and change the PDFT J little; cMF-PDFT in the small
-active space comes within about 4 cm⁻¹ of TPSCI in the large one.
+The first column treats only the two Cr clusters with QDPT2, the three O 2p clusters staying in their cMF states. The
+second adds, for each bridge k, ΔJ_k = J(Cr_A, O_k, Cr_B) − J(Cr_A, Cr_B) from QDPT2 on the triple, which lets
+electrons move between that oxygen and the metals (superexchange through it): J ≈ J_pair + ΔJ_1 + ΔJ_2 + ΔJ_3, a
+many-body expansion truncated at three clusters (the three bridges are equivalent and give the same ΔJ). The bridges
+add to the wave-function J and change the PDFT J little; cMF-PDFT in the small active space comes within about
+4 cm⁻¹ of TPSCI in the large one.
 
 ### Large systems
 
