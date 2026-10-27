@@ -254,3 +254,23 @@ def test_export_subproblem(tmp_path):
         assert d['nact'] == 4 and d['cluster_index'].tolist() == [1, 1, 2, 2]
         e_pair = fci.direct_spin1.FCI().kernel(d['h1'], d['h2'], 4, (2, 2), ecore=float(d['h0']))[0]
         assert e_pair < e - 1e-4
+
+
+def test_ao_labels_exact_atom():
+    """
+    'atom-index symbol shell' labels select exactly that atom, also where PySCF's pattern search (as in older PySCF
+    versions) matches '2 C 2pz' to atoms 12, 22, ...
+    """
+    import re
+    from pycmf.cmf import _search_ao
+    atoms = [['C' if i % 2 == 0 else 'H', (0.9*i, 0.3*(-1)**i, 0)] for i in range(24)]
+    mol = gto.M(atom=atoms, basis='sto-3g', spin=0, verbose=0)
+    labels = mol.ao_labels()
+    assert [labels[i].split()[0] for i in _search_ao(mol, '2 C 2pz')] == ['2']
+    assert len(_search_ao(mol, '0 C 2p')) == 3 and len(_search_ao(mol, '1 H')) == 1
+    with pytest.raises(ValueError):
+        _search_ao(mol, '1 C 2pz')                     # atom 1 is H
+    mol.search_ao_label = lambda label: np.array([i for i, s in enumerate(labels) if re.search(label, s)])
+    cmf = pycmf.CMF(scf.RHF(mol).run())
+    cmf.set_clusters_from_ao([['%d C 2pz' % (2*a) for a in range(k, k + 2)] for k in range(0, 12, 2)], [(1, 1)] * 6)
+    assert [len(c) for c in cmf.clusters] == [2] * 6

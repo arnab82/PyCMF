@@ -461,7 +461,9 @@ class CMF(lib.StreamObject):
         Parameters
         ----------
         ao_labels : list
-            A list of AO labels (as in `mol.search_ao_label`) for each cluster
+            A list of AO labels for each cluster: 'atom-index symbol shell', e.g. '12 C 2pz', '0 Fe 3d' or '3 H',
+            selects the AOs of exactly that atom whose shell starts with the given one (all for none); labels
+            without an atom index are patterns of `mol.search_ao_label`, e.g. 'Fe 3d' for all Fe atoms
         fspace : list
             A list of tuples indicating how many alpha and beta electrons are in each cluster
         method : str
@@ -473,7 +475,8 @@ class CMF(lib.StreamObject):
         clusters = []
         idx_act = []
         for labels in ao_labels:
-            idx = list(self.mol.search_ao_label(labels))
+            labels = [labels] if isinstance(labels, str) else labels
+            idx = sorted(set(i for label in labels for i in _search_ao(self.mol, label)))
             clusters.append(list(range(len(idx_act), len(idx_act) + len(idx))))
             idx_act += idx
         assert len(set(idx_act)) == len(idx_act), "the same AO is in more than one cluster"
@@ -1238,6 +1241,31 @@ class CMF(lib.StreamObject):
                  nact=np.int64(len(orbs)),
                  e_cmf=np.float64(self.e_tot),
                  e_states=np.asarray(e_states, dtype=float))
+
+
+def _search_ao(mol, label:str) -> list:
+    """
+    Indices of the AOs matching `label`. A label that starts with an atom index, e.g. '12 C 2pz', '0 Fe 3d' or '3 H',
+    selects the AOs of exactly that atom whose shell (e.g. '2pz', '3dxy') starts with the rest; the element symbol, if
+    given, is checked. Other labels are patterns of `mol.search_ao_label` (in some PySCF versions those also match
+    '2 C 2pz' to atoms 12, 22, ..., hence the exact match here).
+    """
+    toks = label.split()
+    if not toks or not toks[0].isdigit():
+        idx = list(mol.search_ao_label(label))
+    else:
+        ia, rest = int(toks[0]), toks[1:]
+        if ia >= mol.natm:
+            raise ValueError('AO label %r: the molecule has %d atoms' % (label, mol.natm))
+        if rest and rest[0][0].isalpha():
+            if rest[0].lower() not in (mol.atom_symbol(ia).lower(), mol.atom_pure_symbol(ia).lower()):
+                raise ValueError('AO label %r: atom %d is %s' % (label, ia, mol.atom_symbol(ia)))
+            rest = rest[1:]
+        shell = ''.join(rest)
+        idx = [i for i, (a, symb, nl, m) in enumerate(mol.ao_labels(fmt=False)) if a == ia and (nl + m).startswith(shell)]
+    if len(idx) == 0:
+        raise ValueError('AO label %r matches no AO' % label)
+    return idx
 
 
 def _lbfgs_direction(g, s_hist, y_hist, hdiag):
