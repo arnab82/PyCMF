@@ -75,20 +75,30 @@ def _sijrs(cmf, cache):
     ncore, nvir = moc.shape[1], mov.shape[1]
     if ncore == 0 or nvir == 0:
         return 0.0
-    if 'Lcv' in cache:
-        lov = cache['Lcv'].reshape(-1, ncore*nvir)
-        ovov = lambda i0, i1: np.dot(lov[:, i0*nvir:i1*nvir].T, lov[:, :i1*nvir]).reshape(i1-i0, nvir, i1, nvir)
+    if 'cvL' in cache:
+        b = cache['cvL'].reshape(ncore*nvir, -1)
+        jbia = lambda i, j0, j1, out: lib.dot(b[j0*nvir:j1*nvir], b[i*nvir:(i+1)*nvir].T,
+                                              c=out.reshape(-1, nvir)).reshape(out.shape)
     else:
         eri = cmf.ao2mo((moc, mov, moc, mov))
-        ovov = lambda i0, i1: eri[i0:i1, :, :i1]
+
+        def jbia(i, j0, j1, out):
+            out[:] = eri[j0:j1, :, i]
+            return out
+    eab = e_vir[:, None] + e_vir
+    jblk = min(ncore, max(1, int(cmf.mf.max_memory*.25e6/8/(3*nvir*nvir))))
+    buf = np.empty((3, jblk, nvir, nvir))
     e = 0.0
-    blksize = max(1, int(cmf.mf.max_memory*.25e6/8/(4*ncore*nvir*nvir)))
-    for i0, i1 in lib.prange(0, ncore, blksize):
-        g = ovov(i0, i1).transpose(0, 2, 1, 3)        # (ia|jb) as [i, j, a, b] for j < i1
-        denom = (e_core[i0:i1, None, None, None] + e_core[None, :i1, None, None]) - (e_vir[:, None] + e_vir)
-        i, j = np.arange(i0, i1)[:, None], np.arange(i1)
-        fac = 2.0*(j < i) + 1.0*(j == i)              # (ia|jb) and (ja|ib) give the same term
-        e += np.einsum('ij,ijab,ijab', fac, g / denom, 2*g - g.transpose(0, 1, 3, 2))
+    for i in range(ncore):
+        for j0, j1 in lib.prange(0, i+1, jblk):
+            g = jbia(i, j0, j1, buf[0, :j1-j0])                 # (ia|jb) as [j, b, a]
+            t = np.subtract((e_core[i] + e_core[j0:j1])[:, None, None], eab, out=buf[1, :j1-j0])
+            t = np.divide(g, t, out=t)
+            y = np.multiply(g, 2, out=buf[2, :j1-j0])
+            y -= g.transpose(0, 2, 1)
+            w = np.einsum('jab,jab->j', t, y)
+            w[:i-j0] *= 2                                       # j < i: (ia|jb) and (ja|ib) give the same term
+            e += w.sum()
     return e
 
 
@@ -108,10 +118,10 @@ def _veff(cmf, clusters, core=True):
 
 
 def _block_size(mc, n_per_index):
-    """Number of indices of a loop whose arrays have n_per_index elements per index, to fit in a quarter of the
-    memory
+    """Number of indices of a loop over arrays with n_per_index elements per index: arrays of at most 64 MB (larger
+    ones are slower), four of which fit in a quarter of the memory
     """
-    return max(1, int(mc.max_memory*.25e6/8/max(1, n_per_index)))
+    return max(1, min(int(2**23/max(1, n_per_index)), int(mc.max_memory*.25e6/8/(4*max(1, n_per_index)))))
 
 
 # Sijr, Srsi and Sir of pyscf.mrpt.nevpt2 (Apache License 2.0), with the contractions of three tensors done in
@@ -119,15 +129,17 @@ def _block_size(mc, n_per_index):
 # the contractions are matrix products; the expressions are unchanged
 
 
-def _pair_sum(q, d):
-    """sum_p (2 q[b,m,n,p] - q[b,n,m,p]) sum_a q[b,m,n,a] d[p,a], symmetrized in (m, n), for m <= n
+def _pair_sums(q, ds):
+    """For each d in ds, sum_p (2 q[b,m,n,p] - q[b,n,m,p]) sum_a q[b,m,n,a] d[p,a], symmetrized in (m, n), for m <= n
     """
-    x = lib.dot(q.reshape(-1, q.shape[3]), d.T).reshape(q.shape)
-    out = np.einsum('bmnp,bmnp->bmn', 2*q - q.transpose(0, 2, 1, 3), x)
-    out += out.transpose(0, 2, 1)
+    na = q.shape[3]
+    y = 2*q - q.transpose(0, 2, 1, 3)
+    z = lib.dot(y.reshape(-1, na), np.hstack(ds)).reshape(-1, len(ds), na)
+    out = np.einsum('ip,icp->ci', q.reshape(-1, na), z).reshape((len(ds),) + q.shape[:3])
+    out += out.transpose(0, 1, 3, 2)
     m, n = np.triu_indices(q.shape[1])
-    out = out[:, m, n]
-    out[:, m == n] *= .5
+    out = out[:, :, m, n]
+    out[:, :, m == n] *= .5
     return out
 
 
@@ -143,18 +155,18 @@ def _sijr(mc, dms, eris):
     if 'pacv' in eris:
         block = lambda r0, r1: np.ascontiguousarray(eris['pacv'][:ncore, :, :, r0:r1].transpose(3, 2, 0, 1))
     else:
-        lcv = eris['Lcv']
-        naux = lcv.shape[0]
+        cvl = eris['cvL']
+        naux = cvl.shape[2]
         lca = np.ascontiguousarray(eris['Lpa'][:, :ncore]).reshape(naux, -1)
-        block = lambda r0, r1: lib.dot(np.ascontiguousarray(lcv[:, :, r0:r1].transpose(0, 2, 1)).reshape(naux, -1).T,
+        block = lambda r0, r1: lib.dot(np.ascontiguousarray(cvl[:, r0:r1].transpose(1, 0, 2)).reshape(-1, naux),
                                        lca).reshape(r1-r0, ncore, ncore, ncas)
     i, j = np.triu_indices(ncore)
     e_c = mc.mo_energy[:ncore]
     e = 0.0
-    for r0, r1 in lib.prange(0, nvirt, _block_size(mc, 4*ncore*ncore*ncas)):
+    for r0, r1 in lib.prange(0, nvirt, _block_size(mc, ncore*ncore*ncas)):
         q = block(r0, r1)                                # (i a|j r) as [r, j, i, a]
         diff = mc.mo_energy[nocc+r0:nocc+r1, None] - (e_c[i] + e_c[j])
-        e += _nevpt2._norm_to_energy(_pair_sum(q, hdm1), _pair_sum(q, a3), diff)[1]
+        e += _nevpt2._norm_to_energy(*_pair_sums(q, [hdm1, a3]), diff)[1]
     return e
 
 
@@ -169,18 +181,17 @@ def _srsi(mc, dms, eris):
     if 'pacv' in eris:
         block = lambda i0, i1: np.ascontiguousarray(eris['pacv'][nocc:, :, i0:i1].transpose(2, 3, 0, 1))
     else:
-        lcv = eris['Lcv']
-        naux = lcv.shape[0]
+        cvl = eris['cvL']
+        naux = cvl.shape[2]
         lva = np.ascontiguousarray(eris['Lpa'][:, nocc:]).reshape(naux, -1)
-        block = lambda i0, i1: lib.dot(np.ascontiguousarray(lcv[:, i0:i1]).reshape(naux, -1).T,
-                                       lva).reshape(i1-i0, nvirt, nvirt, ncas)
+        block = lambda i0, i1: lib.dot(cvl[i0:i1].reshape(-1, naux), lva).reshape(i1-i0, nvirt, nvirt, ncas)
     r, s = np.triu_indices(nvirt)
     e_v = mc.mo_energy[nocc:]
     e = 0.0
-    for i0, i1 in lib.prange(0, ncore, _block_size(mc, 4*nvirt*nvirt*ncas)):
+    for i0, i1 in lib.prange(0, ncore, _block_size(mc, nvirt*nvirt*ncas)):
         q = block(i0, i1)                                # (s a|i r) as [i, r, s, a]
         diff = (e_v[r] + e_v[s]) - mc.mo_energy[i0:i1, None]
-        e += _nevpt2._norm_to_energy(_pair_sum(q, dm1), _pair_sum(q, k27), diff)[1]
+        e += _nevpt2._norm_to_energy(*_pair_sums(q, [dm1, k27]), diff)[1]
     return e
 
 
@@ -218,8 +229,8 @@ def _prepare(cmf):
     """
     What all cMF-NEVPT2 sub-problems share: the doubly occupied and virtual orbitals that diagonalize the Fock
     matrix of the cMF density, their energies and, with density fitting, the three-index integrals (L|p t) for p in
-    (core, all active, virtual) and active t, and (L|i a) for core i and virtual a, from which the integrals of
-    every sub-problem are sliced
+    (core, all active, virtual) and active t, as [L, p, t], and (i a|L) for core i and virtual a, as [i, a, L], from
+    which the integrals of every sub-problem are sliced
     """
     mf = cmf.mf
     fock = mf.get_hcore() + _veff(cmf, range(len(cmf.clusters)))
@@ -234,19 +245,23 @@ def _prepare(cmf):
         mo = np.hstack((moc, Cact, mov))
         nao = mo.shape[0]
         blksize = max(4, int(mf.max_memory*.2e6/8/nao**2))
-        lpa, lcv = [], []
+        lpa = []
+        cvl = np.empty((moc.shape[1], mov.shape[1], with_df.get_naoaux()))
+        p0 = 0
         for eri1 in with_df.loop(blksize):
             l = lib.unpack_tril(eri1)
+            p1 = p0 + l.shape[0]
             lpa.append(lib.einsum('Lmt,mp->Lpt', lib.einsum('Lmn,nt->Lmt', l, Cact), mo))
-            lcv.append(lib.einsum('Lmi,ma->Lia', lib.einsum('Lmn,ni->Lmi', l, moc), mov))
+            cvl[:, :, p0:p1] = lib.einsum('Lmi,ma->iaL', lib.einsum('Lmn,ni->Lmi', l, moc), mov)
+            p0 = p1
         cache['Lpa'] = np.concatenate(lpa)
-        cache['Lcv'] = np.concatenate(lcv)
+        cache['cvL'] = cvl
     return cache
 
 
-def _df_eris(lpa, lcv, ncore, ncas):
+def _df_eris(lpa, cvl, ncore, ncas):
     """
-    The blocks of ppaa (pq|tu) and papa (pt|qu) that the NEVPT2 classes use, from (L|p t) and (L|i a); the
+    The blocks of ppaa (pq|tu) and papa (pt|qu) that the NEVPT2 classes use, from (L|p t) and (i a|L); the
     core-core and virtual-virtual blocks of ppaa are not needed and left zero. The (pt|ia) are formed in blocks
     by the classes that need them, `_sijr` and `_srsi`
     """
@@ -259,11 +274,11 @@ def _df_eris(lpa, lcv, ncore, ncas):
     x = lib.dot(lpa2.T, laa).reshape(nmo, ncas, ncas, ncas)
     ppaa[:, ncore:nocc] = x
     ppaa[ncore:nocc] = x.transpose(1, 0, 2, 3)
-    x = lib.dot(lcv.reshape(naux, -1).T, laa).reshape(ncore, nvir, ncas, ncas)
+    x = lib.dot(cvl.reshape(-1, naux), laa).reshape(ncore, nvir, ncas, ncas)
     ppaa[:ncore, nocc:] = x
     ppaa[nocc:, :ncore] = x.transpose(1, 0, 2, 3)
     papa = lib.dot(lpa2.T, lpa2).reshape(nmo, ncas, nmo, ncas)
-    return {'ppaa': ppaa, 'papa': papa, 'Lpa': lpa, 'Lcv': lcv}
+    return {'ppaa': ppaa, 'papa': papa, 'Lpa': lpa, 'cvL': cvl}
 
 
 def nevpt2(cmf, spin_average=True, max_states=64, clusters=None, with_sijrs=True, verbose=None,
@@ -317,7 +332,7 @@ def nevpt2(cmf, spin_average=True, max_states=64, clusters=None, with_sijrs=True
     # integrals, with the frozen and doubly occupied orbitals and the spectator clusters in h1eff
     if 'Lpa' in cache:
         idx = np.concatenate((np.arange(ncore), ncore + orbs, ncore + cmf.Cact.shape[1] + np.arange(nvir)))
-        eris = _df_eris(cache['Lpa'][:, idx[:, None], orbs], cache['Lcv'], ncore, ncas)
+        eris = _df_eris(cache['Lpa'][:, idx[:, None], orbs], cache['cvL'], ncore, ncas)
     else:
         eris = {'ppaa': cmf.ao2mo((mo, mo, Cact, Cact)),
                 'papa': cmf.ao2mo((mo, Cact, mo, Cact)),
