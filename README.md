@@ -330,6 +330,13 @@ Ne atoms, where all clusters fit in one calculation, the RDM expansion gives J =
 The bridges add to the wave-function J and change the PDFT J little; cMF-PDFT in the small active space comes within
 about 4 cm⁻¹ of TPSCI in the large one.
 
+For production runs on a cluster, `examples/cr2_pantazis_ao.py` runs the same complex with AO-based clusters and
+full orbital optimization, in steps with checkpoints (ROHF, ooCMF, QDPT2 spin ladder, cMF-PT1-PDFT, cMF-NEVPT2 with
+frozen core). The default active space is (24e, 38o): Cr 3d+4d (10 orbitals each, three electrons) and the 2p+3p of
+the three bridging O (6 orbitals each, closed shell); `--cr-shells` and `--o-shells` change it, `--bridges` adds the
+Cr–O–Cr triples where their determinant space allows, and `--guess spade` starts from ROHF orbitals projected on the
+cluster AOs.
+
 ### Large systems
 
 Per energy evaluation (one orbital step) the AO work is fixed, independent of the number of clusters
