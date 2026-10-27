@@ -1142,6 +1142,12 @@ class CMF(lib.StreamObject):
         from .mrpt import nevpt2
         return nevpt2(self, spin_average, **kwargs)
 
+    def nevpt2_mbe(self, order=2, cutoff=None, **kwargs):
+        """cMF-NEVPT2 from a many-body expansion over the clusters, see `pycmf.mrpt.nevpt2_mbe`
+        """
+        from .mrpt import nevpt2_mbe
+        return nevpt2_mbe(self, order, cutoff, **kwargs)
+
     def export_fermicg(self, filename:str, clusters=None) -> None:
         """
         Write the active-space problem for post-cMF methods in FermiCG.jl (TPSCI, BST, PT2) to an npz file.

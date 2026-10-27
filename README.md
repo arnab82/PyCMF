@@ -171,7 +171,17 @@ expressions are those of `pyscf.mrpt.nevpt2`: with one cluster, cMF-NEVPT2 is SC
 separated molecules give twice the energy of one (tested). Frozen orbitals (`set_Cfrz`) are not correlated, and with
 density fitting the core-core/virtual-virtual class is computed from the 3-index integrals, so (ia|jb) is never stored
 (it would be (n_core n_virt)^2, about 290 GB for the Fe₂ complex). The active-space RDMs of the cMF state are built in
-the determinant space of the active orbitals, so the active space has to be moderate (about 12 orbitals).
+the determinant space of the active orbitals, so `nevpt2` needs a moderate active space (about 10-12 orbitals).
+
+For larger active spaces, `cmf.nevpt2_mbe(order=2, cutoff=...)` expands cMF-NEVPT2 over the clusters: the
+core-core/virtual-virtual class once, plus the NEVPT2 increment of each cluster and each pair of clusters, with the
+other clusters as frozen spectators. Each term only needs the active space of one or two clusters, and with
+orbital-optimized cMF the pair truncation is within 0.1 mEh of the full cMF-NEVPT2:
+
+| π system (6-31G) | cMF-NEVPT2 | clusters only | clusters + pairs |
+| --- | --- | --- | --- |
+| hexatriene, 3 clusters | -0.460688 | 14.3 mEh error | 0.04 mEh error |
+| octatetraene, 4 clusters | -0.612716 | 22.1 mEh error | 0.08 mEh error |
 
 ### RDMs and properties
 

@@ -80,3 +80,29 @@ def test_size_consistency():
     e1_frz = cmf1.nevpt2()[0]
     assert abs(e2 - 2*e1_frz) < 1e-8
     assert e1 < e1_frz < 0
+
+
+def test_many_body_expansion():
+    """
+    Hexatriene pi system in three clusters, optimized orbitals: the pair-truncated expansion reproduces cMF-NEVPT2,
+    single-cluster terms alone do not
+    """
+    atoms = [['C', (0.000, 0.000, 0)], ['C', (1.169, 0.675, 0)], ['C', (2.425, -0.050, 0)],
+             ['C', (3.594, 0.625, 0)], ['C', (4.850, -0.100, 0)], ['C', (6.019, 0.575, 0)],
+             ['H', (-0.944, 0.545, 0)], ['H', (0.000, -1.090, 0)], ['H', (1.169, 1.765, 0)],
+             ['H', (2.425, -1.140, 0)], ['H', (3.594, 1.715, 0)], ['H', (4.850, -1.190, 0)],
+             ['H', (6.963, 0.030, 0)], ['H', (6.019, 1.665, 0)]]
+    mol = gto.M(atom=atoms, basis='sto-3g', verbose=0)
+    mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
+    cmf = pycmf.CMF(mf)
+    cmf.set_clusters_from_ao([['0 C 2pz', '1 C 2pz'], ['2 C 2pz', '3 C 2pz'], ['4 C 2pz', '5 C 2pz']], [(1, 1)] * 3)
+    cmf.kernel()
+    e_exact = cmf.nevpt2()[0]
+    e1, inc1 = cmf.nevpt2_mbe(order=1)
+    e2, inc2 = cmf.nevpt2_mbe(order=2)
+    assert len(inc2) == 1 + 3 + 3
+    assert abs(e2 - e_exact) < 1e-4
+    assert abs(e1 - e_exact) > 1e-3
+
+    e2_near, inc_near = cmf.nevpt2_mbe(order=2, cutoff=3.0)
+    assert (0, 2) not in inc_near and (0, 1) in inc_near
