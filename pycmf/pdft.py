@@ -331,7 +331,7 @@ def mbe_rdm12(cmf, subsets, order=1, verbose=None, **kwargs) -> dict:
     from .pt2 import mbe_increments
     log = logger.new_logger(cmf, verbose)
     subsets = [tuple(sorted(x)) for x in subsets]
-    eri_act = cmf.get_active_eris()
+    eri_act = cmf._active_eris()
     vcore = cmf.get_core_veff()
     rdms = {}
     for sub in subsets:

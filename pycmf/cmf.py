@@ -2,6 +2,7 @@ import numpy as np
 import scipy.linalg
 import pyscf
 from pyscf import gto, scf, fci, ao2mo, lib, lo
+from pyscf.ao2mo import _ao2mo
 from pyscf.lib import logger
 
 from .helpers import * 
@@ -14,9 +15,10 @@ class CMF(lib.StreamObject):
     :math:`|\Psi\rangle = |I\rangle \otimes |J\rangle \otimes \cdots`, built from one set of
     spin-restricted orbitals. Everything that couples different clusters (and the doubly occupied
     core) is a mean-field interaction, so it is evaluated in the AO basis with the J/K builder of the
-    PySCF mean-field object (``mf.get_jk``). Direct, in-core and density-fitted integrals all work,
-    and the integrals of the full active space are never formed: only the small :math:`n_I^4`
-    integrals of each cluster are transformed.
+    PySCF mean-field object (``mf.get_jk``). Direct, in-core and density-fitted integrals all work.
+    With density fitting the integrals of the full active space are never formed: the active orbitals
+    keep their three-index factors, from which the :math:`n_I^4` integrals of each cluster and the
+    mean field between clusters are built, so hundreds of active orbitals fit in memory.
 
     Open-shell clusters are treated as in restricted open-shell cMF (RO-cMF, Bachhar & Mayhall,
     J. Phys. Chem. A 128, 9015 (2024)): each cluster is an ensemble over the :math:`M_s` components
@@ -434,10 +436,30 @@ class CMF(lib.StreamObject):
         """
         return self.ao2mo((self.Cact,) * 4)
 
+    def _active_eris(self):
+        """
+        The active integrals as the internal routines take them: with density fitting the three-index factors
+        (L|pq) of the active orbitals (naux nact^2 numbers instead of nact^4), otherwise the full (pq|rs)
+        """
+        with_df = getattr(self.mf, 'with_df', None)
+        nact = self.Cact.shape[1]
+        if not hasattr(with_df, 'loop') or nact == 0:
+            return self.get_active_eris()
+        mo = np.asarray(self.Cact, order='F')
+        L = np.empty((with_df.get_naoaux(), nact, nact))
+        p0 = 0
+        for eri1 in with_df.loop():
+            p1 = p0 + eri1.shape[0]
+            L[p0:p1] = _ao2mo.nr_e2(eri1, mo, (0, nact, 0, nact), aosym='s2', mosym='s1').reshape(-1, nact, nact)
+            p0 = p1
+        return _DFActiveERIs(L)
+
     def _get_active_veff(self, i, rdm1, eri_act) -> np.ndarray:
         """J - K/2 of the density `rdm1` of cluster `i`, in the basis of all active orbitals
         """
         ci = self.clusters[i]
+        if isinstance(eri_act, _DFActiveERIs):
+            return eri_act.veff(ci, rdm1)
         vj = np.einsum('pqvw,vw->pq', eri_act[:, :, ci, :][:, :, :, ci], rdm1)
         vk = np.einsum('pwvq,vw->pq', eri_act[:, ci, :, :][:, :, ci, :], rdm1)
         return vj - .5*vk
@@ -606,7 +628,7 @@ class CMF(lib.StreamObject):
         Parameters
         ----------
         eri_act : np.ndarray
-            (pq|rs) of all active orbitals, computed if not given
+            (pq|rs) of all active orbitals (or their density-fitting factors, `_active_eris`), computed if not given
         vcore : np.ndarray
             J - K/2 (AO) of the core, computed if not given
 
@@ -616,7 +638,7 @@ class CMF(lib.StreamObject):
             CMF energy
         """
         if eri_act is None:
-            eri_act = self.get_active_eris()
+            eri_act = self._active_eris()
         if vcore is None:
             vcore = self.get_core_veff()
         e_tot = 0.0
@@ -644,7 +666,7 @@ class CMF(lib.StreamObject):
         e_core = self.mf.energy_nuc() + np.einsum('ij,ji->', self.get_core_dm(), hcore + .5*vcore)
         h_act = self.Cact.T @ (hcore + vcore) @ self.Cact
 
-        eris = [eri_act[np.ix_(ci, ci, ci, ci)] for ci in self.clusters]
+        eris = [_eri_block(eri_act, ci) for ci in self.clusters]
         vact = [self._get_active_veff(i, d, eri_act) for i, d in enumerate(self.cluster_1rdm)]
         v_sum = sum(vact) + np.zeros_like(h_act)
         dm_act = self.make_rdm1()
@@ -856,7 +878,7 @@ class CMF(lib.StreamObject):
             K = unpack(x)
             self.set_mo_coeffs(C0 @ scipy.linalg.expm(K))
             vcore = self.get_core_veff()
-            e = self.cmf_ci(self.get_active_eris(), vcore)
+            e = self.cmf_ci(self._active_eris(), vcore)
             dEdC, hdiag = self._average_deriv(vcore, self.get_cluster_eris_ao(), with_hdiag)
             # chain rule through exp(K): the adjoint of the Frechet derivative of exp at K is the one at K^T
             dEdK = scipy.linalg.expm_frechet(K.T, C0.T @ dEdC, compute_expm=False)
@@ -1122,7 +1144,7 @@ class CMF(lib.StreamObject):
         clusters = list(clusters)
         others = [j for j in range(len(self.clusters)) if j not in clusters]
         if eri_act is None:
-            eri_act = self.get_active_eris()
+            eri_act = self._active_eris()
         if vcore is None:
             vcore = self.get_core_veff()
 
@@ -1139,7 +1161,7 @@ class CMF(lib.StreamObject):
             for j in others:
                 cj = self.clusters[j]
                 rdm1s[j] = rdm1s[j] + w * self.cluster_1rdm[j]
-                e2[j] += w * .5*np.einsum('tuvw,tuvw->', eri_act[np.ix_(cj, cj, cj, cj)], self.cluster_2rdm[j])
+                e2[j] += w * .5*np.einsum('tuvw,tuvw->', _eri_block(eri_act, cj), self.cluster_2rdm[j])
         if self.sa_states is not None:
             self.select_state(0)
 
@@ -1155,7 +1177,7 @@ class CMF(lib.StreamObject):
 
         orbs = np.asarray(sum([list(self.clusters[i]) for i in clusters], []), dtype=int)
         h1 = (h_act + v_env)[np.ix_(orbs, orbs)]
-        h2 = eri_act[np.ix_(orbs, orbs, orbs, orbs)]
+        h2 = _eri_block(eri_act, orbs)
         return h0, h1, h2, orbs
 
     def qdpt2(self, clusters=None, fspaces=None, **kwargs):
@@ -1265,6 +1287,39 @@ class CMF(lib.StreamObject):
                  nact=np.int64(len(orbs)),
                  e_cmf=np.float64(self.e_tot),
                  e_states=np.asarray(e_states, dtype=float))
+
+
+class _DFActiveERIs:
+    """
+    (pq|rs) of the active orbitals kept as their density-fitting factors, (pq|rs) = sum_L (L|pq) (L|rs), with
+    (L|pq) stored as L[L, p, q]: only the blocks that are used are formed
+    """
+    def __init__(self, L):
+        self.L = L
+
+    def block(self, orbs):
+        """(tu|vw) of the active orbitals `orbs`"""
+        n = len(orbs)
+        lo = self.L[:, orbs][:, :, orbs].reshape(-1, n*n)
+        return lib.dot(lo.T, lo).reshape((n,)*4)
+
+    def veff(self, orbs, rdm1):
+        """J - K/2 in all active orbitals of the density `rdm1` of the active orbitals `orbs`"""
+        naux, nact = self.L.shape[:2]
+        lo = self.L[:, orbs]                                        # [L, v, q]
+        rho = lib.einsum('Lvw,vw->L', lo[:, :, orbs], rdm1)
+        vj = lib.dot(rho[None], self.L.reshape(naux, -1)).reshape(nact, nact)
+        x = lib.einsum('vw,Lwp->Lvp', rdm1, lo)
+        vk = lib.dot(x.reshape(-1, nact).T, lo.reshape(-1, nact))
+        return vj - .5*vk
+
+
+def _eri_block(eri_act, orbs):
+    """(tu|vw) of the active orbitals `orbs`, from the full active integrals or their density-fitting factors
+    """
+    if isinstance(eri_act, _DFActiveERIs):
+        return eri_act.block(orbs)
+    return eri_act[np.ix_(orbs, orbs, orbs, orbs)]
 
 
 def _overlap_partition(blocks, Pv, S, n):

@@ -295,7 +295,7 @@ def _setup(cmf, clusters, fspaces, eri_act, vcore):
     """Hamiltonian of the selected clusters, H0 and the configurations of the model space
     """
     if eri_act is None:
-        eri_act = cmf.get_active_eris()
+        eri_act = cmf._active_eris()
     h0, h1, h2, orbs = cmf.get_active_hamiltonian(clusters, eri_act, vcore)
     sizes = [len(cmf.clusters[i]) for i in clusters]
     offsets = np.cumsum([0] + sizes)
@@ -676,7 +676,7 @@ def pt2_mbe(cmf, order=2, cutoff=None, subsets=None, with_rdm=False, **kwargs):
     if subsets is None:
         subsets = cluster_subsets(cmf, order, cutoff)
     subsets = [tuple(sorted(x)) for x in subsets]
-    eri_act = cmf.get_active_eris()
+    eri_act = cmf._active_eris()
     vcore = cmf.get_core_veff()
     nact = cmf.Cact.shape[1]
     dm_ref = cmf.make_rdm1()
