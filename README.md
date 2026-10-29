@@ -76,7 +76,9 @@ So the only steps are
   scalar-relativistic (`scf.sfx2c`) integrals all work, and
 * small transformations `(tu|vw)` and `(μu|vw)` for the orbitals of one cluster at a time.
 
-The integrals of the whole active space are never built, so the number of clusters is not limited by `N_act^4` storage.
+With density fitting the integrals of the whole active space are never built: the active orbitals keep their 3-index
+factors `(L|pq)` (`8 N_aux n_act²` bytes), from which the cluster integrals and the mean field between clusters are formed,
+so the number of clusters is not limited by `n_act⁴` storage.
 The orbitals are optimized with L-BFGS, using the exact gradient of `C = C0 exp(κ)`, and every energy evaluation
 first converges the cluster states (CMF-CI).
 
@@ -342,12 +344,14 @@ cluster AOs.
 Per energy evaluation (one orbital step) the AO work is fixed, independent of the number of clusters
 and of the number of CMF-CI sweeps:
 
-* a J/K build for the core density and a transformation of the active-orbital integrals `(aa|aa)`,
+* a J/K build for the core density and the 3-index factors `(L|pq)` of the active orbitals (without density fitting,
+  the integrals `(aa|aa)`),
 * the CMF-CI sweeps, which only use active-orbital quantities,
 * a J/K build for the converged cluster densities and one pass for the `(μu|vw)` of all clusters (gradient).
 
 The densities are passed to `mf.get_jk` together with their orbitals, so density-fitted K costs
-`O(N_aux N_AO² N_occ)`. `(aa|aa)` needs `8 n_act⁴` bytes (0.8 GB for 100 active orbitals, 13 GB for 200).
+`O(N_aux N_AO² N_occ)`. `(L|pq)` needs `8 N_aux n_act²` bytes (2 GB for 200 active orbitals of C₁₀₀H₁₀₂ in 6-31G);
+`(aa|aa)`, without density fitting, `8 n_act⁴` bytes (0.8 GB for 100 active orbitals, 13 GB for 200).
 
 Use density fitting, `mf = scf.RHF(mol).density_fit()`. Its 3-index integrals, `8 N_aux N_AO²/2` bytes, have to fit in memory:
 for a 200-atom organic molecule that is about 9 GB in STO-3G, 30 GB in 6-31G and 90-140 GB in def2-SVP
@@ -380,6 +384,11 @@ of 4 orbitals (40 active orbitals, 121 doubly occupied, 283 virtual), pair terms
 The NEVPT2 time is the shared 3-index integrals (26 s), the core-core/virtual-virtual class (37 s), and 11 s per
 cluster and 19 s per pair, which are dominated by matrix multiplications (`O(n_core n_virt² N_aux n_act)`); with the
 cutoff the number of pairs grows linearly with the length of the system.
+
+[`ao_cmf_200_active.ipynb`](ao_cmf_200_active.ipynb) sets up a 200-orbital active space: C₁₀₀H₁₀₂ in 6-31G with the
+2p_z and 3p_z AOs of every carbon, in 25 AO clusters of 8 orbitals, then runs AO-cMF, QDPT2 between neighbouring
+clusters and cMF-NEVPT2. It prints the memory needed for the chosen settings, writes checkpoints so a stopped run
+continues where it was, and has a small test setting (`TEST_RUN = True`, 32 active orbitals).
 
 ### Copyright
 
