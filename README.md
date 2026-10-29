@@ -91,13 +91,26 @@ gradients within the trust radius and is accepted on the CMF-CI energy. The resp
 the Hessian, so near the minimum the steps are too short by a constant factor and convergence is linear, at a rate set
 by the strength of that response; the CG tolerance follows the observed error of the quadratic model.
 
-A Hessian product costs about twice the J/K work of an energy evaluation, so Newton pays off when the problem is badly
-conditioned, which is typical of clusters made of AOs started from the AOs themselves (`set_clusters_from_ao`,
-`guess='ao'`): the orbital Hessian then has very soft modes and L-BFGS crawls. Ethylene with the 2p_z/3p_z AOs of each
-carbon as clusters: L-BFGS is 22 mEh above the minimum after 200 iterations, Newton converges in 30 steps. For
-[Cr₂(OH)₃(tmtacn)₂]³⁺ (38 active orbitals), L-BFGS stalled at |g| ≈ 2.6e-2 after 175 iterations; one Newton step
-from there brought |g| to 3.3e-3. On easy problems L-BFGS is cheaper (C₁₆H₁₈ π clusters from the AOs: 48 L-BFGS
-iterations in 205 s, 7 Newton steps with 119 Hessian products in 514 s, same energy).
+Before each step (and before L-BFGS starts) the orbitals are rotated within each space, which leaves the energy
+unchanged, into the basis the diagonal Hessian guess assumes: doubly occupied and virtual orbitals that diagonalize the
+Fock matrix, and the natural orbitals of each cluster (CI vectors and RDMs transformed along). Orbitals built from AOs
+are an arbitrary basis of each space, and in particular cluster orbitals that mix strongly and weakly occupied natural
+orbitals hide the very soft rotations of the weakly occupied ones (e.g. the correlating 4d-like orbitals of a 3d metal)
+from the diagonal; this is what makes L-BFGS crawl from AO starts.
+
+A Hessian product costs about 1.5-2 gradients (with density fitting, one pass over the 3-index integrals with the
+half-transformed integrals of the occupied orbitals cached), and a step typically needs 1-5 of them:
+
+| system (AO clusters from the AO start) | L-BFGS | Newton |
+| --- | --- | --- |
+| C₁₆H₁₈, 2p_z/3p_z of each C, 4 clusters (32 active orbitals) | 22 iterations, 78 s | 6 steps, 12 Hessian products, 38 s, same energy |
+| ethylene, 2p_z/3p_z of each C | not converged after 200 iterations (22 mEh above) | 24 steps, 46 Hessian products |
+| [Cr₂(OH)₃(tmtacn)₂]³⁺, Cr 3d4d + O 2p3p (38 active orbitals) | stalled at \|g\| ≈ 3e-2 after 175 iterations | from there: −8.9 mEh, \|g\| < 1e-4 in 14 steps (32 min, 4 cores) |
+
+In Cr₂ the L-BFGS point was not near a minimum: once the clusters were in their natural orbitals, Newton found
+negative curvature and went down a long, flat valley in which the weakly occupied Cr correlating orbitals reshape
+(the Cr clusters stay 96 % on their Cr atom). [`ao_cmf_200_active.ipynb`](ao_cmf_200_active.ipynb) runs the
+200-orbital polyene with either optimizer and compares them.
 
 **Open-shell clusters (RO-cMF).** Each cluster is the ensemble over the `M_s` components of its spin multiplet,
 so the energy only needs spin-summed 1RDMs and spin-free 2RDMs, the embedding `J - K/2` is spin independent,
