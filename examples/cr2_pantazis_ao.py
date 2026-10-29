@@ -50,6 +50,8 @@ p.add_argument('--geometry', default=os.path.join(here, 'data', 'cr2_pantazis.xy
 p.add_argument('--max-memory', type=int, default=16000, help='MB')
 p.add_argument('--conv-tol-grad', type=float, default=1e-5, help='orbital gradient of ooCMF')
 p.add_argument('--conv-tol', type=float, default=1e-9, help='energy change of ooCMF (both criteria must be met)')
+p.add_argument('--algorithm', default='newton', choices=['newton', 'lbfgs'],
+               help='ooCMF optimizer: trust-region Newton (robust from the AO start) or L-BFGS')
 p.add_argument('--guess', default='ao', choices=['ao', 'spade'],
                help='cluster orbitals: the orthogonalized AOs themselves (ao), or the ROHF orbitals projected on them '
                     '(spade, a start closer to the optimized cMF)')
@@ -99,6 +101,7 @@ log('active space: (%de, %do), clusters %s, %d doubly occupied, %d virtual' % (
     sum(map(sum, fspace)), nact, [len(c) for c in cmf.clusters], cmf.Cdoc.shape[1], cmf.Cvir.shape[1]))
 cmf.conv_tol_grad = args.conv_tol_grad
 cmf.conv_tol = args.conv_tol
+cmf.algorithm = args.algorithm
 cmf.verbose = 4
 if 'cmf' in steps:
     if os.path.exists('cmf_orbitals.npy'):

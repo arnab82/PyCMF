@@ -61,6 +61,8 @@ class CMF(lib.StreamObject):
         self.max_cycle       = 200
         self.max_stepsize    = 0.5      # max norm of an orbital rotation step
         self.lbfgs_memory    = 20
+        self.algorithm       = 'lbfgs'  # orbital optimizer: 'lbfgs', or 'newton' (trust-region Newton, see gen_g_hop)
+        self.max_cycle_cg    = 50       # Newton: conjugate-gradient iterations per step
         self.chkfile         = None     # .npy file for the [doc, act, vir] orbitals after every iteration (restarts)
         self.zero_intra_rots = True     # rotations within a cluster are redundant for FCI
 
@@ -231,7 +233,8 @@ class CMF(lib.StreamObject):
                  self.Cfrz.shape[1], self.Cdoc.shape[1], self.Cact.shape[1], self.Cvir.shape[1])
         for i, (ci, fi) in enumerate(zip(self.clusters, self.fspace)):
             log.info('cluster %3d  (na, nb) = %-8s orbitals = %s', i, tuple(fi), list(ci))
-        log.info('conv_tol = %g  conv_tol_grad = %g  max_cycle = %d', self.conv_tol, self.conv_tol_grad, self.max_cycle)
+        log.info('conv_tol = %g  conv_tol_grad = %g  max_cycle = %d  algorithm = %s',
+                 self.conv_tol, self.conv_tol_grad, self.max_cycle, self.algorithm)
         log.info('conv_tol_rdm1 = %g  max_cycle_rdm1 = %d  sequential = %s',
                  self.conv_tol_rdm1, self.max_cycle_rdm1, self.sequential)
         if self.sa_states is not None:
@@ -849,22 +852,121 @@ class CMF(lib.StreamObject):
         F = .5 * np.einsum('mp,mp->p', C, dEdC)
         return 2*(n[:, None]*f[None, :] + n[None, :]*f[:, None] - F[:, None] - F[None, :])
 
-    def kernel(self) -> float:
+    def gen_g_hop(self, vcore=None):
         """
-        Optimize the orbitals and the cluster states (orbital optimized CMF)
+        Orbital gradient, Hessian-vector product and diagonal Hessian guess for the rotations of `rotation_mask`,
+        at the current orbitals and cluster states.
 
-        The orbitals are C = C0 exp(kappa). Every energy evaluation converges CMF-CI, so the cluster
-        states are stationary and the exact gradient with respect to kappa only needs the cluster RDMs.
-        kappa is optimized with L-BFGS, starting from a diagonal Hessian guess, with a backtracking line search.
+        The Hessian is that of the energy at fixed cluster RDMs (the response of the cluster states is left out, as
+        in the Newton method of ClusterMeanField.jl), i.e. of E = sum h n + 1/2 sum (pq|rs) G with the cMF 1RDM n
+        and 2RDM G (mean field between clusters, exact within each), for C -> C exp(kappa). It is never formed: H x
+        is the derivative of dE/dC along dC = C x, which needs one J/K build for the (low-rank) changes of the
+        total and cluster densities and one pass over the integrals for the intra-cluster 2RDM term. With
+        `state_average_` everything is averaged over the states.
 
         Returns
         -------
-        e_tot : float
-            CMF energy
+        g : np.ndarray
+            Orbital gradient (as in `orbital_gradient`, packed with `rotation_mask`)
+        h_op : callable
+            x -> H x, packed the same way
+        h_diag : np.ndarray
+            `approx_hessian_diag` (all orbital pairs), e.g. for preconditioning
         """
-        log = logger.new_logger(self)
-        self.dump_flags()
+        if vcore is None:
+            vcore = self.get_core_veff()
+        C0 = self.get_mo_coeffs()
+        nmo = C0.shape[1]
+        ndoc = self.Cdoc.shape[1]
+        mask = self.rotation_mask()
+        cols = [ndoc + np.asarray(ci, dtype=int) for ci in self.clusters]
+        hcore = self.mf.get_hcore()
+        eris_ao = self.get_cluster_eris_ao()
 
+        g = 0
+        h_diag = 0
+        states = []
+        for k, w in self._states():
+            if k is not None:
+                self.select_state(k)
+            vclusters = self.get_cluster_veff()
+            veff = (vcore, vclusters)
+            dEdC = self.energy_deriv(veff, eris_ao)
+            A = C0.T @ dEdC
+            g = g + w * (A - A.T)[mask]
+            h_diag = h_diag + w * self.approx_hessian_diag(veff, dEdC)
+            # sqrt of the cluster 1RDMs, gamma = s s^T, for low-rank density changes
+            sq = [u * np.sqrt(np.maximum(n, 0)) for n, u in map(np.linalg.eigh, self.cluster_1rdm)]
+            states.append(dict(w=w, A=A, occ=self.get_occ(), fock=hcore + vcore + sum(vclusters), vclusters=vclusters,
+                               rdm1=[d.copy() for d in self.cluster_1rdm], rdm2=[d.copy() for d in self.cluster_2rdm], sq=sq))
+        if self.sa_states is not None:
+            self.select_state(0)
+
+        def h_op(x):
+            Y = np.zeros((nmo, nmo))
+            Y[mask] = x
+            Y = Y - Y.T
+            dC = C0 @ Y
+            # dD = P Q^T + Q P^T for the total density and each cluster density, passed to J/K as A A^T - B B^T
+            # with A, B = (Q +- P)/sqrt(2), so that density-fitted K costs as much as for the densities themselves
+            orbs = []
+            for st in states:
+                fac = [(dC[:, c] @ q, C0[:, c] @ q) for c, q in zip(cols, st['sq'])]
+                P = np.hstack([np.sqrt(2)*dC[:, :ndoc]] + [f[0] for f in fac])
+                Q = np.hstack([np.sqrt(2)*C0[:, :ndoc]] + [f[1] for f in fac])
+                for p, q in [(P, Q)] + fac:
+                    orbs += [(q + p)/np.sqrt(2), (q - p)/np.sqrt(2)]
+            v = self._get_veff(orbs, [np.ones(c.shape[1]) for c in orbs])
+            v = v[0::2] - v[1::2]
+            dX = self._cluster_eris_ao_deriv(dC, [st['rdm2'] for st in states])
+            nv = 1 + len(cols)
+            dM = 0
+            for k, st in enumerate(states):
+                vk = v[k*nv:(k+1)*nv]
+                dG = 2 * (vk[0] @ C0 + st['fock'] @ dC) @ st['occ']
+                for i, c in enumerate(cols):
+                    dG[:, c] += 2*(dX[k][i] - (vk[1+i] @ C0[:, c] + st['vclusters'][i] @ dC[:, c]) @ st['rdm1'][i])
+                # d/dt of the chain rule through exp(t x) adds -(x A + A x)/2
+                dM = dM + st['w'] * (C0.T @ dG - .5*(Y @ st['A'] + st['A'] @ Y))
+            return (dM - dM.T)[mask]
+
+        return g, h_op, h_diag
+
+    def _cluster_eris_ao_deriv(self, dC, rdm2s) -> list:
+        """
+        Change of sum_uvw (mu u|v w) G^I_tuvw (the 2RDM term of `energy_deriv`) for the change `dC` of the
+        [doc, act, vir] orbitals, for each cluster I and each set of cluster 2RDMs rdm2s[k] (one per state):
+        sum_uvw [(mu du|v w) G^I_tuvw + (mu u|dv w) (G^I_tuvw + G^I_tuwv)]
+        """
+        ndoc = self.Cdoc.shape[1]
+        dCact = dC[:, ndoc:ndoc + self.Cact.shape[1]]
+        sym = [[d + d.transpose(0, 1, 3, 2) for d in r] for r in rdm2s]
+        out = [[np.zeros((self.nbas, len(ci))) for ci in self.clusters] for r in rdm2s]
+        if hasattr(getattr(self.mf, 'with_df', None), 'loop'):
+            for eri1 in self.mf.with_df.loop():
+                l = lib.unpack_tril(eri1)
+                lpa = lib.einsum('Lmn,na->Lma', l, self.Cact)
+                lpd = lib.einsum('Lmn,na->Lma', l, dCact)
+                for i, ci in enumerate(self.clusters):
+                    lvw = lib.einsum('mv,Lmw->Lvw', self.Cact[:, ci], lpa[:, :, ci])
+                    ldw = lib.einsum('mv,Lmw->Lvw', dCact[:, ci], lpa[:, :, ci])
+                    for k in range(len(rdm2s)):
+                        z1 = lib.einsum('Lvw,tuvw->Ltu', lvw, rdm2s[k][i])
+                        z2 = lib.einsum('Lvw,tuvw->Ltu', ldw, sym[k][i])
+                        out[k][i] += lib.einsum('Lmu,Ltu->mt', lpd[:, :, ci], z1) + lib.einsum('Lmu,Ltu->mt', lpa[:, :, ci], z2)
+            return out
+        eye = np.eye(self.nbas)
+        for i, ci in enumerate(self.clusters):
+            Ci, dCi = self.Cact[:, ci], dCact[:, ci]
+            t1 = self.ao2mo((eye, dCi, Ci, Ci))
+            t2 = self.ao2mo((eye, Ci, dCi, Ci))
+            for k in range(len(rdm2s)):
+                out[k][i] = np.einsum('muvw,tuvw->mt', t1, rdm2s[k][i]) + np.einsum('muvw,tuvw->mt', t2, sym[k][i])
+        return out
+
+    def _kernel_lbfgs(self, log):
+        """L-BFGS orbital optimization, returns the energy and the orbital gradient
+        """
         C0 = self.get_mo_coeffs()
         nmo = C0.shape[1]
         mask = self.rotation_mask()
@@ -938,6 +1040,101 @@ class CMF(lib.StreamObject):
             log.info('ooCMF iter %3d  E = %.12f  dE = %.3e  |g| = %.3e  |step| = %.3e',
                      it, e, de, np.linalg.norm(g), np.linalg.norm(s))
             self.converged = np.linalg.norm(g) < self.conv_tol_grad and abs(de) < self.conv_tol
+        return e, g
+
+    def _kernel_newton(self, log):
+        """
+        Trust-region Newton orbital optimization, returns the energy and the orbital gradient
+
+        Each step solves H s = -g by preconditioned conjugate gradients (truncated at the trust radius or at
+        negative curvature, Steihaug), with H the orbital Hessian at fixed cluster RDMs from `gen_g_hop`; CMF-CI is
+        converged at the new orbitals and the step is accepted if the energy goes down by at least a tenth of the
+        decrease predicted by the quadratic model. The trust radius (at most `max_stepsize`) follows that ratio.
+        """
+        C = self.get_mo_coeffs()
+        nmo = C.shape[1]
+        mask = self.rotation_mask()
+
+        def unpack(x):
+            K = np.zeros((nmo, nmo))
+            K[mask] = x
+            return K - K.T
+
+        vcore = self.get_core_veff()
+        e = self.cmf_ci(self._active_eris(), vcore)
+        g, h_op, h_diag = self.gen_g_hop(vcore)
+        log.info('ooCMF iter %3d  E = %.12f  |g| = %.3e', 0, e, np.linalg.norm(g))
+        radius = self.max_stepsize
+        ratio = 1.0
+        self.converged = np.linalg.norm(g) < self.conv_tol_grad
+        for it in range(1, self.max_cycle+1):
+            if self.converged:
+                break
+            gnorm = np.linalg.norm(g)
+            precond = np.maximum(abs(h_diag[mask]), .1)
+            # relative CG tolerance: superlinear (sqrt|g|) while the quadratic model is accurate, but no tighter than
+            # its error, seen in the ratio of actual to predicted energy changes (the cluster-state response that
+            # the Hessian leaves out makes the steps too short by a constant factor near convergence)
+            eta = min(.5, max(np.sqrt(gnorm), .5*abs(1 - ratio)))
+            for trial in range(10):
+                s, hs, ncg = _trust_region_cg(h_op, g, precond, radius, eta * gnorm, self.max_cycle_cg)
+                de_model = np.dot(g, s) + .5*np.dot(s, hs)
+                self.set_mo_coeffs(C @ scipy.linalg.expm(unpack(s)))
+                vcore = self.get_core_veff()
+                e_new = self.cmf_ci(self._active_eris(), vcore)
+                ratio = (e_new - e) / de_model if de_model < 0 else -1
+                # a predicted decrease below the numerical precision of the energy: judge the step by the gradient
+                tiny = abs(de_model) < 1e-11 * max(1, abs(e))
+                if ratio > .1 or tiny:
+                    g_new, h_op_new, h_diag_new = self.gen_g_hop(vcore)
+                    if ratio > .1 or np.linalg.norm(g_new) < gnorm:
+                        break
+                log.debug('ooCMF step rejected: |s| = %.3e  dE = %.3e  predicted %.3e', np.linalg.norm(s), e_new - e, de_model)
+                radius = .25 * np.linalg.norm(s)
+            else:
+                log.warn('ooCMF trust region collapsed')
+                self.set_mo_coeffs(C)
+                vcore = self.get_core_veff()
+                e = self.cmf_ci(self._active_eris(), vcore)
+                break
+            snorm = np.linalg.norm(s)
+            if ratio > .75 and snorm > .8*radius:
+                radius = min(2*radius, self.max_stepsize)
+            elif ratio < .25:
+                radius = .5*snorm
+            de = e_new - e
+            C, e, g, h_op, h_diag = self.get_mo_coeffs(), e_new, g_new, h_op_new, h_diag_new
+            if self.chkfile:
+                np.save(self.chkfile, C)
+            log.info('ooCMF iter %3d  E = %.12f  dE = %.3e  |g| = %.3e  |step| = %.3e  CG %2d  ratio %.2f',
+                     it, e, de, np.linalg.norm(g), snorm, ncg, ratio)
+            self.converged = np.linalg.norm(g) < self.conv_tol_grad and abs(de) < self.conv_tol
+        return e, g
+
+    def kernel(self) -> float:
+        """
+        Optimize the orbitals and the cluster states (orbital optimized CMF)
+
+        The orbitals are C = C0 exp(kappa). Every energy evaluation converges CMF-CI, so the cluster
+        states are stationary and the exact gradient with respect to kappa only needs the cluster RDMs.
+        `algorithm` selects the optimizer: 'lbfgs' (default), L-BFGS from a diagonal Hessian guess with a
+        backtracking line search, or 'newton', trust-region Newton steps with the orbital Hessian at fixed
+        cluster RDMs (`gen_g_hop`), which converges in fewer, more expensive iterations and copes with
+        badly conditioned problems (e.g. orbitals that start far from the optimum).
+
+        Returns
+        -------
+        e_tot : float
+            CMF energy
+        """
+        log = logger.new_logger(self)
+        self.dump_flags()
+        if self.algorithm == 'lbfgs':
+            e, g = self._kernel_lbfgs(log)
+        elif self.algorithm == 'newton':
+            e, g = self._kernel_newton(log)
+        else:
+            raise ValueError("algorithm must be 'lbfgs' or 'newton'")
 
         if self.converged:
             log.note('ooCMF converged  E = %.12f', e)
@@ -1408,3 +1605,41 @@ def _lbfgs_direction(g, s_hist, y_hist, hdiag):
         b = np.dot(y, r) / np.dot(y, s)
         r += s * (a - b)
     return r
+
+
+def _trust_region_cg(h_op, g, precond, radius, tol, max_cycle):
+    """
+    Steihaug conjugate gradients for min g.s + s.H s/2 with |s| <= radius, preconditioned by diag(precond):
+    stops when |H s + g| < tol, at negative curvature or at the trust radius (then on the boundary).
+    Returns the step, H s and the number of H products
+    """
+    def to_boundary(s, d):
+        # tau >= 0 with |s + tau d| = radius
+        a, b, c = np.dot(d, d), 2*np.dot(s, d), np.dot(s, s) - radius**2
+        return (-b + np.sqrt(max(b*b - 4*a*c, 0))) / (2*a)
+
+    s = np.zeros_like(g)
+    hs = np.zeros_like(g)
+    r = -g
+    z = r / precond
+    d = z
+    rz = np.dot(r, z)
+    for it in range(1, max_cycle+1):
+        hd = h_op(d)
+        dhd = np.dot(d, hd)
+        if dhd <= 0:
+            tau = to_boundary(s, d)
+            return s + tau*d, hs + tau*hd, it
+        alpha = rz / dhd
+        if np.linalg.norm(s + alpha*d) >= radius:
+            tau = to_boundary(s, d)
+            return s + tau*d, hs + tau*hd, it
+        s = s + alpha*d
+        hs = hs + alpha*hd
+        r = r - alpha*hd
+        if np.linalg.norm(r) < tol:
+            break
+        z = r / precond
+        rz, rz_old = np.dot(r, z), rz
+        d = z + (rz / rz_old) * d
+    return s, hs, it
