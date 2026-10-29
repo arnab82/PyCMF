@@ -367,7 +367,20 @@ full orbital optimization, in steps with checkpoints (ROHF, ooCMF, QDPT2 spin la
 frozen core). The default active space is (24e, 38o): Cr 3d+4d (10 orbitals each, three electrons) and the 2p+3p of
 the three bridging O (6 orbitals each, closed shell); `--cr-shells` and `--o-shells` change it, `--bridges` adds the
 Cr–O–Cr triples where their determinant space allows, and `--guess spade` starts from ROHF orbitals projected on the
-cluster AOs.
+cluster AOs. The orbitals are optimized with the Newton optimizer (L-BFGS stalls 8.9 mEh above the minimum).
+With the defaults (def2-SVP, all 665 orbitals optimized, |g| < 1e-4, 4 cores):
+
+| | |
+| --- | --- |
+| cMF energy | -3344.208134 Eh (Cr clusters 96 % on their Cr, O clusters with their O–H) |
+| QDPT2 J, Cr–Cr pair | -16.45 cm⁻¹ |
+| cMF-PDFT, spin-coupled states (tPBE / ftPBE) | +9.05 / +8.49 cm⁻¹ |
+| cMF-PT1-PDFT, Cr–Cr pair (tPBE / ftPBE) | -31.20 / -31.30 cm⁻¹ |
+| cMF-NEVPT2 (order 1, 37 frozen core orbitals) | -4.249134 Eh, total -3348.457268 Eh |
+
+The `export` and `tpsci_pdft` steps run TPSCI (TPSChem.jl, `examples/tpsci_rdms.jl`) and TPSCI-PDFT in the same
+active space and orbitals, which separates the error of the first-order wave function and of the missing bridges from
+that of the functional.
 
 ### Large systems
 
