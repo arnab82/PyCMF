@@ -1,3 +1,4 @@
+import ctypes
 import numpy as np
 import scipy.linalg
 import pyscf
@@ -902,21 +903,32 @@ class CMF(lib.StreamObject):
         if self.sa_states is not None:
             self.select_state(0)
 
+        # with density fitting, (L|i nu) of the doc and active orbitals are the same for every H x: keep them if they fit
+        use_df = hasattr(getattr(self.mf, 'with_df', None), 'loop')
+        lq_cache = None
+        if use_df:
+            Cq = C0[:, :ndoc + self.Cact.shape[1]]
+            if self.mf.with_df.get_naoaux() * Cq.shape[1] * self.nbas * 8e-6 < .5 * (self.mf.max_memory - lib.current_memory()[0]):
+                lq_cache = [_half_transform(eri1, Cq) for eri1 in self.mf.with_df.loop()]
+
         def h_op(x):
             Y = np.zeros((nmo, nmo))
             Y[mask] = x
             Y = Y - Y.T
             dC = C0 @ Y
-            # the changes of the core density and of each cluster density (whose sum is that of the total density),
-            # dD = P Q^T + Q P^T, are passed to J/K as A A^T - B B^T with A, B = (Q +- P)/sqrt(2), so that
-            # density-fitted K costs as much as for the densities themselves
-            fac = [(np.sqrt(2)*dC[:, :ndoc], np.sqrt(2)*C0[:, :ndoc])]
-            for st in states:
-                fac += [(dC[:, c] @ q, C0[:, c] @ q) for c, q in zip(cols, st['sq'])]
-            orbs = sum([[(q + p)/np.sqrt(2), (q - p)/np.sqrt(2)] for p, q in fac], [])
-            v = self._get_veff(orbs, [np.ones(c.shape[1]) for c in orbs])
-            v = v[0::2] - v[1::2]
-            dX = self._cluster_eris_ao_deriv(dC, [st['rdm2'] for st in states])
+            # J - K/2 of the changes of the core density and of each cluster density (their sum is the change of the
+            # total density), and the change of the 2RDM term
+            if use_df:
+                v, dX = self._df_response(dC, states, lq_cache)
+            else:
+                # dD = P Q^T + Q P^T, passed to J/K as A A^T - B B^T with A, B = (Q +- P)/sqrt(2)
+                fac = [(np.sqrt(2)*dC[:, :ndoc], np.sqrt(2)*C0[:, :ndoc])]
+                for st in states:
+                    fac += [(dC[:, c] @ q, C0[:, c] @ q) for c, q in zip(cols, st['sq'])]
+                orbs = sum([[(q + p)/np.sqrt(2), (q - p)/np.sqrt(2)] for p, q in fac], [])
+                v = self._get_veff(orbs, [np.ones(c.shape[1]) for c in orbs])
+                v = v[0::2] - v[1::2]
+                dX = self._cluster_eris_ao_deriv(dC, [st['rdm2'] for st in states])
             nc = len(cols)
             dM = 0
             for k, st in enumerate(states):
@@ -929,6 +941,50 @@ class CMF(lib.StreamObject):
             return (dM - dM.T)[mask]
 
         return g, h_op, h_diag
+
+    def _df_response(self, dC, states, lq_cache=None):
+        """
+        Density-fitted part of `gen_g_hop`'s H x, in one pass over the 3-index integrals: J - K/2 of the changes of
+        the core density and of each cluster density (of each state), and the change of the 2RDM term (as
+        `_cluster_eris_ao_deriv`), for the change `dC` of the orbitals.
+        With n the occupations of a block of orbitals C, dD = dC n C^T + C n dC^T, so with (L|u nu) half-transformed
+        integrals K[dD] = X + X^T, X = sum_L (L|du mu) n_uv (L|v nu), and J needs rho_L = 2 sum (L|du C_v) n_uv.
+        (L|i nu) of the doc and active orbitals are taken from `lq_cache` (one array per block of integrals) if given
+        """
+        nao = self.nbas
+        ndoc, nact = self.Cdoc.shape[1], self.Cact.shape[1]
+        Cq = np.hstack((self.Cdoc, self.Cact))
+        dCq = dC[:, :ndoc + nact]
+        # (orbitals as columns of [doc, act], occupations): the core, then the clusters of each state
+        blocks = [(np.arange(ndoc), 2.0)]
+        for st in states:
+            blocks += [(ndoc + np.asarray(ci, dtype=int), d) for ci, d in zip(self.clusters, st['rdm1'])]
+        cn = [Cq[:, b] * n if np.isscalar(n) else Cq[:, b] @ n for b, n in blocks]
+        sym = [[d + d.transpose(0, 1, 3, 2) for d in st['rdm2']] for st in states]
+        vj = 0
+        vk = np.zeros((len(blocks), nao, nao))
+        dX = [[np.zeros((nao, len(ci))) for ci in self.clusters] for st in states]
+        for k, eri1 in enumerate(self.mf.with_df.loop()):
+            lq = lq_cache[k] if lq_cache is not None else _half_transform(eri1, Cq)
+            lp = _half_transform(eri1, dCq)
+            rho = np.empty((len(blocks), eri1.shape[0]))
+            for ib, ((b, n), c) in enumerate(zip(blocks, cn)):
+                lpb = lp[:, b]
+                rho[ib] = 2 * lib.einsum('Lum,mu->L', lpb, c)
+                y = n * lq[:, b] if np.isscalar(n) else lib.einsum('uv,Lvm->Lum', n, lq[:, b])
+                vk[ib] += lib.dot(lpb.reshape(-1, nao).T, y.reshape(-1, nao))
+            vj = vj + lib.dot(rho, eri1)
+            for i, ci in enumerate(self.clusters):
+                c = ndoc + np.asarray(ci, dtype=int)
+                lqi, lpi = lq[:, c], lp[:, c]
+                lvw = lib.einsum('mv,Lwm->Lvw', self.Cact[:, ci], lqi)
+                ldw = lib.einsum('mv,Lwm->Lvw', dC[:, c], lqi)
+                for s, st in enumerate(states):
+                    z1 = lib.einsum('Lvw,tuvw->Ltu', lvw, st['rdm2'][i])
+                    z2 = lib.einsum('Lvw,tuvw->Ltu', ldw, sym[s][i])
+                    dX[s][i] += lib.einsum('Lum,Ltu->mt', lpi, z1) + lib.einsum('Lum,Ltu->mt', lqi, z2)
+        v = lib.unpack_tril(vj) - .5*(vk + vk.transpose(0, 2, 1))
+        return v, dX
 
     def _cluster_eris_ao_deriv(self, dC, rdm2s) -> list:
         """
@@ -1068,6 +1124,7 @@ class CMF(lib.StreamObject):
         for it in range(1, self.max_cycle+1):
             if self.converged:
                 break
+            t0 = logger.perf_counter()
             gnorm = np.linalg.norm(g)
             precond = np.maximum(abs(h_diag[mask]), .1)
             # relative CG tolerance: superlinear (sqrt|g|) while the quadratic model is accurate, but no tighter than
@@ -1075,7 +1132,7 @@ class CMF(lib.StreamObject):
             # the Hessian leaves out makes the steps too short by a constant factor near convergence)
             eta = min(.5, max(np.sqrt(gnorm), .5*abs(1 - ratio)))
             for trial in range(10):
-                s, hs, ncg = _trust_region_cg(h_op, g, precond, radius, eta * gnorm, self.max_cycle_cg)
+                s, hs, ncg, stop = _trust_region_cg(h_op, g, precond, radius, eta * gnorm, self.max_cycle_cg)
                 de_model = np.dot(g, s) + .5*np.dot(s, hs)
                 self.set_mo_coeffs(C @ scipy.linalg.expm(unpack(s)))
                 vcore = self.get_core_veff()
@@ -1087,7 +1144,7 @@ class CMF(lib.StreamObject):
                     g_new, h_op_new, h_diag_new = self.gen_g_hop(vcore)
                     if ratio > .1 or np.linalg.norm(g_new) < gnorm:
                         break
-                log.debug('ooCMF step rejected: |s| = %.3e  dE = %.3e  predicted %.3e', np.linalg.norm(s), e_new - e, de_model)
+                log.info('ooCMF step rejected: |s| = %.3e  dE = %.3e  predicted %.3e', np.linalg.norm(s), e_new - e, de_model)
                 radius = .25 * np.linalg.norm(s)
             else:
                 log.warn('ooCMF trust region collapsed')
@@ -1104,8 +1161,8 @@ class CMF(lib.StreamObject):
             C, e, g, h_op, h_diag = self.get_mo_coeffs(), e_new, g_new, h_op_new, h_diag_new
             if self.chkfile:
                 np.save(self.chkfile, C)
-            log.info('ooCMF iter %3d  E = %.12f  dE = %.3e  |g| = %.3e  |step| = %.3e  CG %2d  ratio %.2f',
-                     it, e, de, np.linalg.norm(g), snorm, ncg, ratio)
+            log.info('ooCMF iter %3d  E = %.12f  dE = %.3e  |g| = %.3e  |step| = %.3e  ratio %.2f  CG %d (%s)  %.0f s',
+                     it, e, de, np.linalg.norm(g), snorm, ratio, ncg, stop, logger.perf_counter() - t0)
             self.converged = np.linalg.norm(g) < self.conv_tol_grad and abs(de) < self.conv_tol
         return e, g
 
@@ -1604,12 +1661,28 @@ def _lbfgs_direction(g, s_hist, y_hist, hdiag):
         r += s * (a - b)
     return r
 
+def _half_transform(eri1, C) -> np.ndarray:
+    """(L|i nu) = sum_mu C_mu,i (L|mu nu) for a block of 3-index integrals in PySCF's packed (s2) layout, as [L, i, nu]
+    """
+    naux = eri1.shape[0]
+    nao, ncol = C.shape
+    out = np.empty((naux, ncol, nao))
+    if ncol == 0 or naux == 0:
+        return out
+    eri1 = np.asarray(eri1, order='C')
+    C = np.asarray(C, order='F')
+    _ao2mo.libao2mo.AO2MOnr_e2_drv(
+        _ao2mo.libao2mo.AO2MOtranse2_nr_s2, _ao2mo.libao2mo.AO2MOmmm_bra_nr_s2,
+        out.ctypes.data_as(ctypes.c_void_p), eri1.ctypes.data_as(ctypes.c_void_p), C.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(naux), ctypes.c_int(nao), (ctypes.c_int*4)(0, ncol, 0, nao), lib.c_null_ptr(), ctypes.c_int(0))
+    return out
+
 
 def _trust_region_cg(h_op, g, precond, radius, tol, max_cycle):
     """
     Steihaug conjugate gradients for min g.s + s.H s/2 with |s| <= radius, preconditioned by diag(precond):
     stops when |H s + g| < tol, at negative curvature or at the trust radius (then on the boundary).
-    Returns the step, H s and the number of H products
+    Returns the step, H s, the number of H products and why it stopped
     """
     def to_boundary(s, d):
         # tau >= 0 with |s + tau d| = radius
@@ -1627,17 +1700,17 @@ def _trust_region_cg(h_op, g, precond, radius, tol, max_cycle):
         dhd = np.dot(d, hd)
         if dhd <= 0:
             tau = to_boundary(s, d)
-            return s + tau*d, hs + tau*hd, it
+            return s + tau*d, hs + tau*hd, it, 'negative curvature'
         alpha = rz / dhd
         if np.linalg.norm(s + alpha*d) >= radius:
             tau = to_boundary(s, d)
-            return s + tau*d, hs + tau*hd, it
+            return s + tau*d, hs + tau*hd, it, 'trust radius'
         s = s + alpha*d
         hs = hs + alpha*hd
         r = r - alpha*hd
         if np.linalg.norm(r) < tol:
-            break
+            return s, hs, it, 'converged'
         z = r / precond
         rz, rz_old = np.dot(r, z), rz
         d = z + (rz / rz_old) * d
-    return s, hs, it
+    return s, hs, it, 'max_cycle_cg'
