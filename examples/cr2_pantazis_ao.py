@@ -6,6 +6,8 @@
     qdpt2   spin ladder and exchange coupling J of the two Cr(III) (S = 3/2), H = -2J S_A.S_B
     pdft    cMF-PT1-PDFT: PDFT (tPBE, ftPBE) on the QDPT2 first-order wave function of each spin state, and J
     nevpt2  cMF-NEVPT2 correlation energy of the environment (frozen core), for the total energy
+    export  the active-space problem of all clusters for TPSCI (cmf_tpsci.npz, see examples/tpsci_rdms.jl)
+    tpsci_pdft  TPSCI and TPSCI-PDFT (tPBE, ftPBE) J from the TPSCI RDMs that tpsci_rdms.jl writes (tpsci_rdms.npz)
 
 Default active space, as the 38-orbital TPSCI space of github.com/arnab82/cMF_data: Cr 3d+4d (10 orbitals, three
 electrons, antiparallel M_s) and the 2p+3p of the three bridging O (6 orbitals, closed shell): (24e, 38o). The
@@ -15,6 +17,12 @@ cMF energy is a few Eh above the ROHF). --guess spade starts from ROHF orbitals 
 
     python cr2_pantazis_ao.py --steps scf,cmf,qdpt2,pdft,nevpt2
     python cr2_pantazis_ao.py --steps qdpt2,pdft --bridges          # reuses rohf.chk and cmf_orbitals.npy
+
+TPSCI-PDFT in the same active space and orbitals (TPSChem.jl; a spin ladder of two S = 3/2 needs 4 roots):
+
+    python cr2_pantazis_ao.py --steps export
+    TPSCI_NROOTS=4 julia --project=/path/to/TPSChem.jl -t auto ../tpsci_rdms.jl cmf_tpsci.npz tpsci_rdms.npz
+    python cr2_pantazis_ao.py --steps tpsci_pdft
 
 Each step reads the checkpoints of the previous ones from the working directory (rohf.chk, cmf_orbitals.npy), so
 steps can run as separate jobs; results are appended to results.json. The orbitals are saved after every ooCMF
@@ -61,6 +69,7 @@ p.add_argument('--bridges', action='store_true', help='add the Cr-O-Cr triples t
 p.add_argument('--max-det', type=float, default=2e7, help='largest determinant space of a QDPT2 subset')
 p.add_argument('--nevpt2-order', type=int, default=1)
 p.add_argument('--nevpt2-cutoff', type=float, default=None, help='Angstrom, for --nevpt2-order 2')
+p.add_argument('--tpsci-rdms', default='tpsci_rdms.npz', help='RDMs of the TPSCI roots for the tpsci_pdft step')
 args = p.parse_args()
 steps = args.steps.split(',')
 results = {'args': vars(args)}
@@ -113,12 +122,13 @@ if 'cmf' in steps:
 elif os.path.exists('cmf_orbitals.npy'):
     cmf.set_mo_coeffs(np.load('cmf_orbitals.npy'))
     cmf.cmf_ci()
+    cmf.converged = np.linalg.norm(cmf.orbital_gradient()[cmf.rotation_mask()]) < args.conv_tol_grad
 else:
     raise RuntimeError('no cmf_orbitals.npy: run the cmf step first')
 cmf.verbose = 0
 results['e_cmf'] = cmf.e_tot
 results['cmf_converged'] = bool(cmf.converged)
-log('cMF %.10f  converged %s' % (cmf.e_tot, cmf.converged))
+log('cMF %.10f  converged %s%s' % (cmf.e_tot, cmf.converged, '' if 'cmf' in steps else ' (orbitals from cmf_orbitals.npy)'))
 save()
 
 # ---------------------------------------------------------------- QDPT2 and PT1-PDFT of the spin ladder
@@ -175,5 +185,19 @@ if 'nevpt2' in steps:
     results['e_nevpt2'] = e_nev
     results['nevpt2_increments'] = {str(k): v for k, v in inc.items()}
     log('cMF-NEVPT2 (order %d): %.8f  E(cMF) + NEVPT2 = %.8f' % (args.nevpt2_order, e_nev, cmf.e_tot + e_nev))
+    save()
+# ---------------------------------------------------------------- TPSCI (TPSChem.jl) and TPSCI-PDFT
+if 'export' in steps:
+    cmf.export_fermicg('cmf_tpsci.npz')
+    log('wrote cmf_tpsci.npz (%d active orbitals in %d clusters) for examples/tpsci_rdms.jl' % (nact, len(cmf.clusters)))
+
+if 'tpsci_pdft' in steps:
+    for x in ('tPBE', 'ftPBE'):
+        ot = pdft.make_ot(mol, x, grids_level=args.grids_level)
+        states, j_tpsci, j_pdft = pdft.tpsci_spin_ladder(cmf, args.tpsci_rdms, ot=ot)
+        results['j_tpsci'] = j_tpsci*CM
+        results['j_tpsci_pdft_' + x] = j_pdft*CM
+        log('TPSCI J = %.2f cm-1, TPSCI-PDFT %s J = %.2f cm-1, roots (E_TPSCI, S, E_PDFT): %s' % (
+            j_tpsci*CM, x, j_pdft*CM, ' '.join('(%.8f, %.1f, %.8f)' % st for st in states)))
     save()
 log('done')
