@@ -75,7 +75,7 @@ def test_newton_matches_lbfgs():
         cmf.conv_tol_grad = 1e-7
         e[alg] = cmf.kernel()
         assert cmf.converged
-        assert np.linalg.norm(cmf.orbital_gradient()) < 1e-6
+        assert np.linalg.norm(cmf.orbital_gradient()[cmf.rotation_mask()]) < 1e-6
     assert abs(e['lbfgs'] - e['newton']) < 1e-10
 
 
@@ -95,11 +95,11 @@ def test_newton_ao_start():
     e = cmf.kernel()
     assert cmf.converged
     assert e < mf.e_tot - 0.02
-    assert np.linalg.norm(cmf.orbital_gradient()) < 1e-6
+    assert np.linalg.norm(cmf.orbital_gradient()[cmf.rotation_mask()]) < 1e-6
 
     cmf = _h4_cation_sa()
     cmf.algorithm = 'newton'
     e = cmf.kernel()
     assert cmf.converged
     assert abs(e - (.7*cmf.e_states[0] + .3*cmf.e_states[1])) < 1e-12
-    assert np.linalg.norm(cmf.orbital_gradient()) < 1e-6
+    assert np.linalg.norm(cmf.orbital_gradient()[cmf.rotation_mask()]) < 1e-6

@@ -853,13 +853,20 @@ class CMF(lib.StreamObject):
         F = .5 * np.einsum('mp,mp->p', C, dEdC)
         return 2*(n[:, None]*f[None, :] + n[None, :]*f[:, None] - F[:, None] - F[None, :])
 
-    def _canonicalize_doc_vir(self, vcore=None) -> None:
+    def _canonicalize_orbitals(self, vcore=None) -> None:
         """
-        Rotate the doubly occupied orbitals among themselves, and the virtual orbitals among themselves, to diagonalize
-        the mean-field Fock matrix of the cMF density (averaged over the states of a state average) in each space.
-        This does not change the energy, but the diagonal Hessian guess (`approx_hessian_diag`) assumes it: orbitals
-        built from AOs (`set_clusters_from_ao`) are an arbitrary basis of each space, e.g. mixing metal 1s and ligand
-        orbitals, and the large Fock couplings between them then make the guess, and the optimizers, poor.
+        Rotate the orbitals within each space, which does not change the energy, into the basis that the diagonal
+        Hessian guess (`approx_hessian_diag`) assumes:
+
+        * doubly occupied and virtual orbitals: diagonalize the mean-field Fock matrix of the cMF density (averaged
+          over the states of a state average) in each space,
+        * each cluster: its natural orbitals (of the state-averaged 1RDM), with the cluster states and RDMs
+          transformed along.
+
+        Orbitals built from AOs (`set_clusters_from_ao`) are an arbitrary basis of each space: doubly occupied orbitals
+        mixing metal 1s and ligand orbitals give large Fock couplings, and cluster orbitals mixing strongly and weakly
+        occupied natural orbitals hide the very soft rotations of the weakly occupied ones (e.g. 4d correlating
+        orbitals of a 3d metal) from the diagonal, which makes the guess, and the optimizers, poor.
         """
         if vcore is None:
             vcore = self.get_core_veff()
@@ -875,6 +882,30 @@ class CMF(lib.StreamObject):
             C = getattr(self, name)
             if C.shape[1]:
                 setattr(self, name, C @ np.linalg.eigh(C.T @ fock @ C)[1])
+        if self.cluster_1rdm is None or not self.clusters:
+            return
+
+        avg = [0 for ci in self.clusters]
+        for k, w in self._states():
+            if k is not None:
+                self.select_state(k)
+            avg = [a + w*d for a, d in zip(avg, self.cluster_1rdm)]
+        us = [np.linalg.eigh(d)[1][:, ::-1] for d in avg]
+        Cact = self.Cact.copy()
+        for ci, u in zip(self.clusters, us):
+            Cact[:, ci] = Cact[:, ci] @ u
+        self.Cact = Cact
+        for k, w in self._states():
+            if k is not None:
+                self.select_state(k)
+            for i, (ci, u) in enumerate(zip(self.clusters, us)):
+                if self.ci[i] is not None:
+                    self.ci[i] = fci.addons.transform_ci_for_orbital_rotation(self.ci[i], len(ci), tuple(self.fspace[i]), u)
+                self.cluster_1rdm[i] = u.T @ self.cluster_1rdm[i] @ u
+                if self.cluster_2rdm[i] is not None:
+                    self.cluster_2rdm[i] = lib.einsum('abcd,at,bu,cv,dw->tuvw', self.cluster_2rdm[i], u, u, u, u)
+        if self.sa_states is not None:
+            self.select_state(0)
 
     def gen_g_hop(self, vcore=None):
         """
@@ -1046,7 +1077,7 @@ class CMF(lib.StreamObject):
         """
         vcore = self.get_core_veff()
         self.cmf_ci(self._active_eris(), vcore)
-        self._canonicalize_doc_vir(vcore)
+        self._canonicalize_orbitals(vcore)
         C0 = self.get_mo_coeffs()
         nmo = C0.shape[1]
         mask = self.rotation_mask()
@@ -1142,7 +1173,7 @@ class CMF(lib.StreamObject):
 
         vcore = self.get_core_veff()
         e = self.cmf_ci(self._active_eris(), vcore)
-        self._canonicalize_doc_vir(vcore)
+        self._canonicalize_orbitals(vcore)
         C = self.get_mo_coeffs()
         g, h_op, h_diag = self.gen_g_hop(vcore)
         log.info('ooCMF iter %3d  E = %.12f  |g| = %.3e', 0, e, np.linalg.norm(g))
@@ -1169,7 +1200,7 @@ class CMF(lib.StreamObject):
                 # a predicted decrease below the numerical precision of the energy: judge the step by the gradient
                 tiny = abs(de_model) < 1e-11 * max(1, abs(e))
                 if ratio > .1 or tiny:
-                    self._canonicalize_doc_vir(vcore)
+                    self._canonicalize_orbitals(vcore)
                     g_new, h_op_new, h_diag_new = self.gen_g_hop(vcore)
                     if ratio > .1 or np.linalg.norm(g_new) < gnorm:
                         break

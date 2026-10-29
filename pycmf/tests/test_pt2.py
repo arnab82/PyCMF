@@ -149,7 +149,8 @@ def test_qdpt2_wavefunction():
 
     res = cmf.qdpt2(with_rdm=True)
     dm_fci = fci.direct_spin1.make_rdm1(np.linalg.eigh(H)[1][:, 0].reshape(6, 6), 4, (2, 2))
-    assert abs(res.make_rdm1() - dm_fci).max() < abs(cmf.make_rdm1() - dm_fci).max() - 0.02
+    # Frobenius norm: invariant to rotations of the orbitals within a cluster, which the optimizers may apply
+    assert np.linalg.norm(res.make_rdm1() - dm_fci) < np.linalg.norm(cmf.make_rdm1() - dm_fci) - 0.02
     assert abs(np.trace(res.make_rdm1()) - 4) < 1e-10
     assert abs(np.trace(res.make_rdm1(ao_repr=True) @ mf.get_ovlp()) - 4) < 1e-10
     dm1, dm2 = res.make_rdm12()
