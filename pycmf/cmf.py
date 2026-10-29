@@ -1154,13 +1154,13 @@ class CMF(lib.StreamObject):
                 break
             t0 = logger.perf_counter()
             gnorm = np.linalg.norm(g)
-            precond = np.maximum(abs(h_diag[mask]), .1)
+            precond = np.maximum(abs(h_diag[mask]), 1e-3)
             # relative CG tolerance: superlinear (sqrt|g|) while the quadratic model is accurate, but no tighter than
             # its error, seen in the ratio of actual to predicted energy changes (the cluster-state response that
             # the Hessian leaves out makes the steps too short by a constant factor near convergence)
             eta = min(.5, max(np.sqrt(gnorm), .5*abs(1 - ratio)))
             for trial in range(10):
-                s, hs, ncg, stop = _trust_region_cg(h_op, g, precond, radius, eta * gnorm, self.max_cycle_cg)
+                s, hs, ncg, stop = _trust_region_cg(h_op, g, precond, radius, eta, self.max_cycle_cg)
                 de_model = np.dot(g, s) + .5*np.dot(s, hs)
                 self.set_mo_coeffs(C @ scipy.linalg.expm(unpack(s)))
                 vcore = self.get_core_veff()
@@ -1707,11 +1707,12 @@ def _half_transform(eri1, C) -> np.ndarray:
     return out
 
 
-def _trust_region_cg(h_op, g, precond, radius, tol, max_cycle):
+def _trust_region_cg(h_op, g, precond, radius, rtol, max_cycle):
     """
-    Steihaug conjugate gradients for min g.s + s.H s/2 with |s| <= radius, preconditioned by diag(precond):
-    stops when |H s + g| < tol, at negative curvature or at the trust radius (then on the boundary).
-    Returns the step, H s, the number of H products and why it stopped
+    Steihaug conjugate gradients for min g.s + s.H s/2 with |s| <= radius, preconditioned by M = diag(precond):
+    stops when the residual r = -(H s + g) has |r|_M^-1 < rtol |g|_M^-1 (the norm that preconditioned CG reduces;
+    with a wide range of curvatures |r| itself can grow while the model improves), at negative curvature or at the
+    trust radius (then on the boundary). Returns the step, H s, the number of H products and why it stopped
     """
     def to_boundary(s, d):
         # tau >= 0 with |s + tau d| = radius
@@ -1723,7 +1724,7 @@ def _trust_region_cg(h_op, g, precond, radius, tol, max_cycle):
     r = -g
     z = r / precond
     d = z
-    rz = np.dot(r, z)
+    rz = rz0 = np.dot(r, z)
     for it in range(1, max_cycle+1):
         hd = h_op(d)
         dhd = np.dot(d, hd)
@@ -1737,9 +1738,9 @@ def _trust_region_cg(h_op, g, precond, radius, tol, max_cycle):
         s = s + alpha*d
         hs = hs + alpha*hd
         r = r - alpha*hd
-        if np.linalg.norm(r) < tol:
-            return s, hs, it, 'converged'
         z = r / precond
         rz, rz_old = np.dot(r, z), rz
+        if rz < rtol**2 * rz0:
+            return s, hs, it, 'converged'
         d = z + (rz / rz_old) * d
     return s, hs, it, 'max_cycle_cg'
