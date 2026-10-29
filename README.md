@@ -82,6 +82,23 @@ so the number of clusters is not limited by `n_act⁴` storage.
 The orbitals are optimized with L-BFGS, using the exact gradient of `C = C0 exp(κ)`, and every energy evaluation
 first converges the cluster states (CMF-CI).
 
+**Newton optimizer.** `cmf.algorithm = 'newton'` takes trust-region Newton steps with the orbital Hessian of the
+energy at fixed cluster RDMs, as `cmf_oo_newton` in ClusterMeanField.jl. The Hessian is never stored:
+`cmf.gen_g_hop()` returns the gradient and a function for Hessian-vector products, the derivative of the AO-basis
+`dE/dC` along `dC = C x`, which needs one J/K build of the (low-rank) changes of the core and cluster densities and
+one pass over the integrals for the intra-cluster 2RDM term. Each step solves `H s = -g` by preconditioned conjugate
+gradients within the trust radius and is accepted on the CMF-CI energy. The response of the cluster states is not in
+the Hessian, so near the minimum the steps are too short by a constant factor and convergence is linear, at a rate set
+by the strength of that response; the CG tolerance follows the observed error of the quadratic model.
+
+A Hessian product costs about twice the J/K work of an energy evaluation, so Newton pays off when the problem is badly
+conditioned, which is typical of clusters made of AOs started from the AOs themselves (`set_clusters_from_ao`,
+`guess='ao'`): the orbital Hessian then has very soft modes and L-BFGS crawls. Ethylene with the 2p_z/3p_z AOs of each
+carbon as clusters: L-BFGS is 22 mEh above the minimum after 200 iterations, Newton converges in 30 steps. For
+[Cr₂(OH)₃(tmtacn)₂]³⁺ (38 active orbitals), L-BFGS stalled at |g| ≈ 2.6e-2 after 175 iterations; one Newton step
+from there brought |g| to 3.3e-3. On easy problems L-BFGS is cheaper (C₁₆H₁₈ π clusters from the AOs: 48 L-BFGS
+iterations in 205 s, 7 Newton steps with 119 Hessian products in 514 s, same energy).
+
 **Open-shell clusters (RO-cMF).** Each cluster is the ensemble over the `M_s` components of its spin multiplet,
 so the energy only needs spin-summed 1RDMs and spin-free 2RDMs, the embedding `J - K/2` is spin independent,
 the cluster states are spin pure, and the orbitals are restricted. `fspace` only selects the `M_s` sector a cluster is solved in.

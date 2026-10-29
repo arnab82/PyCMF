@@ -1,7 +1,8 @@
 """
 [Cr2(OH)3(tmtacn)2]3+ (Pantazis) with AO-based clusters and full orbital optimization:
 
-    cmf     orbital-optimized RO-cMF (all doubly occupied, active and virtual orbitals optimized)
+    cmf     orbital-optimized RO-cMF (all doubly occupied, active and virtual orbitals optimized; trust-region
+            Newton by default, since L-BFGS stalls on the soft orbital modes of the AO start)
     qdpt2   spin ladder and exchange coupling J of the two Cr(III) (S = 3/2), H = -2J S_A.S_B
     pdft    cMF-PT1-PDFT: PDFT (tPBE, ftPBE) on the QDPT2 first-order wave function of each spin state, and J
     nevpt2  cMF-NEVPT2 correlation energy of the environment (frozen core), for the total energy

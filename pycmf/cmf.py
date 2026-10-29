@@ -907,25 +907,23 @@ class CMF(lib.StreamObject):
             Y[mask] = x
             Y = Y - Y.T
             dC = C0 @ Y
-            # dD = P Q^T + Q P^T for the total density and each cluster density, passed to J/K as A A^T - B B^T
-            # with A, B = (Q +- P)/sqrt(2), so that density-fitted K costs as much as for the densities themselves
-            orbs = []
+            # the changes of the core density and of each cluster density (whose sum is that of the total density),
+            # dD = P Q^T + Q P^T, are passed to J/K as A A^T - B B^T with A, B = (Q +- P)/sqrt(2), so that
+            # density-fitted K costs as much as for the densities themselves
+            fac = [(np.sqrt(2)*dC[:, :ndoc], np.sqrt(2)*C0[:, :ndoc])]
             for st in states:
-                fac = [(dC[:, c] @ q, C0[:, c] @ q) for c, q in zip(cols, st['sq'])]
-                P = np.hstack([np.sqrt(2)*dC[:, :ndoc]] + [f[0] for f in fac])
-                Q = np.hstack([np.sqrt(2)*C0[:, :ndoc]] + [f[1] for f in fac])
-                for p, q in [(P, Q)] + fac:
-                    orbs += [(q + p)/np.sqrt(2), (q - p)/np.sqrt(2)]
+                fac += [(dC[:, c] @ q, C0[:, c] @ q) for c, q in zip(cols, st['sq'])]
+            orbs = sum([[(q + p)/np.sqrt(2), (q - p)/np.sqrt(2)] for p, q in fac], [])
             v = self._get_veff(orbs, [np.ones(c.shape[1]) for c in orbs])
             v = v[0::2] - v[1::2]
             dX = self._cluster_eris_ao_deriv(dC, [st['rdm2'] for st in states])
-            nv = 1 + len(cols)
+            nc = len(cols)
             dM = 0
             for k, st in enumerate(states):
-                vk = v[k*nv:(k+1)*nv]
-                dG = 2 * (vk[0] @ C0 + st['fock'] @ dC) @ st['occ']
+                vk = v[1 + k*nc:1 + (k+1)*nc]
+                dG = 2 * ((v[0] + vk.sum(axis=0)) @ C0 + st['fock'] @ dC) @ st['occ']
                 for i, c in enumerate(cols):
-                    dG[:, c] += 2*(dX[k][i] - (vk[1+i] @ C0[:, c] + st['vclusters'][i] @ dC[:, c]) @ st['rdm1'][i])
+                    dG[:, c] += 2*(dX[k][i] - (vk[i] @ C0[:, c] + st['vclusters'][i] @ dC[:, c]) @ st['rdm1'][i])
                 # d/dt of the chain rule through exp(t x) adds -(x A + A x)/2
                 dM = dM + st['w'] * (C0.T @ dG - .5*(Y @ st['A'] + st['A'] @ Y))
             return (dM - dM.T)[mask]
