@@ -345,10 +345,14 @@ def energies_ot(cmf, ots, dm1, dm2, max_memory=2000) -> np.ndarray:
     pi_deriv = max(ot.Pi_deriv for ot in ots)
     ni = ot0._numint
     make_rho = [ni._gen_rho_evaluator(cmf.mol, dm1s[i], hermi=1, with_lapl=False)[0] for i in range(2)]
-    # grid blocks from the memory still free (the 3-index integrals may hold most of max_memory), at most 4 GB
-    max_memory = min(4000, max(500, max_memory - lib.current_memory()[0]))
+    # grid blocks from the memory still free (the 3-index integrals may hold most of max_memory), at most 2 GB, for
+    # the AO values and derivatives and the on-top pair density intermediates (~6 n_act^2 numbers per point)
+    from pyscf.dft.gen_grid import BLKSIZE
+    budget = min(2000, max(300, max_memory - lib.current_memory()[0]))
+    per_point = 8 * ((1, 4, 10)[min(dens_deriv, 2)] * C.shape[0] + 6 * cmf.Cact.shape[1]**2 + 16)
+    blksize = max(BLKSIZE, int(budget * 1e6 / per_point) // BLKSIZE * BLKSIZE)
     e = np.zeros(len(ots))
-    for ao, mask, weight, _ in ni.block_loop(cmf.mol, ot0.grids, C.shape[0], dens_deriv, max_memory):
+    for ao, mask, weight, _ in ni.block_loop(cmf.mol, ot0.grids, C.shape[0], dens_deriv, budget, blksize=blksize):
         rho = np.asarray([m(0, ao, mask, xctype) for m in make_rho])
         if rho.ndim == 2:
             rho = rho[:, None]
