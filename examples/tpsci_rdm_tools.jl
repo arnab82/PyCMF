@@ -330,16 +330,100 @@ end
 
 _hms(t) = @sprintf("%d:%02d:%02d", floor(Int, t / 3600), floor(Int, t / 60) % 60, floor(Int, t) % 60)
 
+# ---------------------------------------------------------------- on-cluster blocks
+const _FCI = TPSChem.ActiveSpaceSolvers.FCI
+
+# occupied-orbital lists of the strings of ne electrons in no orbitals, in TPSChem's order (an FCI vector is a
+# (alpha string, beta string) matrix, alpha fastest)
+function _strings(no, ne)
+    ne == 0 && return [Int[]]
+    d = _FCI.DeterminantString(no, ne)
+    _FCI.reset!(d)
+    out = Vector{Vector{Int}}()
+    for i in 1:binomial(no, ne)
+        push!(out, copy(d.config))
+        _FCI.incr!(d)
+    end
+    return out
+end
+
+# a_r on each string I of ne electrons: the list of (r, J, sign), J the string of ne - 1 electrons
+function _annihilations(no, ne)
+    L = Dict(c => i for (i, c) in enumerate(_strings(no, ne - 1)))
+    return [[(r, L[deleteat!(copy(c), k)], isodd(k - 1) ? -1 : 1) for (k, r) in enumerate(c)] for c in _strings(no, ne)]
+end
+
 """
-    oncluster_2rdm!(G, v, cluster_bases, offsets; wmin=1e-14)
+    cluster_2rdm_gram(no, na, nb, Φ, w) -> G (no, no, no, no)
+
+Spin-free 2RDM sum_k w_k <phi_k|p'q'sr|phi_k> of the FCI vectors Φ[:, k] (no orbitals, na alpha and nb beta
+electrons), from Gram matrices of the two-hole vectors X^{τσ}_{ab} = a_{aτ} a_{bσ} phi:
+G[p,q,r,s] = sum_στ <X^{τσ}_{qp}|X^{τσ}_{sr}>, with X^{βα}_{qp} = -X^{αβ}_{pq}. (The constant signs from moving past
+the other spin's operators cancel in each Gram matrix.) Two BLAS products per state instead of TPSChem's determinant
+loops (compute_rdm1_rdm2: 26 s for a 10-orbital (5,4) vector)
+"""
+function cluster_2rdm_gram(no, na, nb, Φ::AbstractMatrix{T}, w::AbstractVector{T}) where T
+    da, db, n2 = binomial(no, na), binomial(no, nb), no * no
+    Mss, Mab = zeros(T, n2, n2), zeros(T, n2, n2)
+    a1 = na >= 1 ? _annihilations(no, na) : nothing
+    a2 = na >= 2 ? _annihilations(no, na - 1) : nothing
+    b1 = nb >= 1 ? _annihilations(no, nb) : nothing
+    b2 = nb >= 2 ? _annihilations(no, nb - 1) : nothing
+    for k in axes(Φ, 2)
+        wk = w[k]
+        φ = reshape(view(Φ, :, k), da, db)
+        if na >= 2          # αα: X_{qp} = a_q a_p φ on the alpha strings
+            d2 = binomial(no, na - 2)
+            X = zeros(T, d2, db, n2)
+            @inbounds for I in 1:da, (p, J1, s1) in a1[I], (q, J2, s2) in a2[J1]
+                c, s = q + (p - 1) * no, s1 * s2
+                for Ib in 1:db
+                    X[J2, Ib, c] += s * φ[I, Ib]
+                end
+            end
+            X = reshape(X, :, n2)
+            mul!(Mss, X', X, wk, one(T))
+        end
+        if nb >= 2          # ββ
+            d2 = binomial(no, nb - 2)
+            X = zeros(T, da, d2, n2)
+            @inbounds for I in 1:db, (p, J1, s1) in b1[I], (q, J2, s2) in b2[J1]
+                c, s = q + (p - 1) * no, s1 * s2
+                for Ia in 1:da
+                    X[Ia, J2, c] += s * φ[Ia, I]
+                end
+            end
+            X = reshape(X, :, n2)
+            mul!(Mss, X', X, wk, one(T))
+        end
+        if na >= 1 && nb >= 1   # αβ: X_{ab} = a_{aα} a_{bβ} φ
+            X = zeros(T, binomial(no, na - 1), binomial(no, nb - 1), n2)
+            @inbounds for Ib in 1:db, (b, Jb, sb) in b1[Ib], Ia in 1:da, (a, Ja, sa) in a1[Ia]
+                X[Ja, Jb, a + (b - 1) * no] += sa * sb * φ[Ia, Ib]
+            end
+            X = reshape(X, :, n2)
+            mul!(Mab, X', X, wk, one(T))
+        end
+    end
+    G = zeros(T, no, no, no, no)
+    @inbounds for s in 1:no, r in 1:no, q in 1:no, p in 1:no
+        G[p, q, r, s] = Mss[q+(p-1)*no, s+(r-1)*no] + Mab[q+(p-1)*no, s+(r-1)*no] + Mab[p+(q-1)*no, r+(s-1)*no]
+    end
+    return G
+end
+
+"""
+    oncluster_2rdm!(G, v, cluster_bases, offsets; wmin=1e-14, progress=true)
 
 Adds the on-cluster 2RDM blocks (all four indices on one cluster) of each root to G (n, n, n, n, R): the cluster
 density matrix rho_uv of each Fock sector, diagonalized into natural cluster states phi_k with weights w_k,
-sum_uv rho_uv <u|p'q'sr|v> = sum_k w_k <phi_k|p'q'sr|phi_k>
+sum_uv rho_uv <u|p'q'sr|v> = sum_k w_k <phi_k|p'q'sr|phi_k> (cluster_2rdm_gram), threaded over clusters, sectors and
+roots
 """
-function oncluster_2rdm!(G, v::TPSChem.TPSCIstate{T,N,R}, bases, offsets; wmin=1e-14) where {T,N,R}
+function oncluster_2rdm!(G, v::TPSChem.TPSCIstate{T,N,R}, bases, offsets; wmin=1e-14, progress=true) where {T,N,R}
+    jobs = Tuple{Int,Tuple{Int16,Int16},Int,Matrix{T}}[]     # (cluster, sector, root, rho)
     for ci in v.clusters
-        I, n, off = ci.idx, length(ci), offsets[ci.idx]
+        I = ci.idx
         rho = Dict{Tuple{Int16,Int16},Array{T,3}}()
         for (fock, configs) in v.data
             m = size(bases[I][fock[I]].vectors, 2)
@@ -353,20 +437,31 @@ function oncluster_2rdm!(G, v::TPSChem.TPSCIstate{T,N,R}, bases, offsets; wmin=1
                 ρ[u, w, r] += cu[r] * cw[r]
             end
         end
-        for (sector, ρ) in rho
-            sol = bases[I][sector]
-            for r in 1:R
-                F = eigen(Symmetric(ρ[:, :, r]))
-                for k in eachindex(F.values)
-                    wk = F.values[k]
-                    abs(wk) < wmin && continue
-                    φ = sol.vectors * F.vectors[:, k]
-                    _, _, aa, bb, ab = TPSChem.ActiveSpaceSolvers.FCI.compute_rdm1_rdm2(sol.ansatz, φ, φ)
-                    for s in 1:n, rr in 1:n, q in 1:n, p in 1:n
-                        G[off+p, off+q, off+rr, off+s, r] += wk * (aa[p, rr, q, s] + bb[p, rr, q, s] +
-                                                                   ab[p, rr, q, s] + ab[q, s, p, rr])
-                    end
-                end
+        for (sector, ρ) in rho, r in 1:R
+            push!(jobs, (I, sector, r, ρ[:, :, r]))
+        end
+    end
+    # largest FCI spaces first
+    sort!(jobs, by=j -> -length(bases[j[1]][j[2]].vectors))
+    lk, done, t0 = ReentrantLock(), Ref(0), time()
+    BLAS.set_num_threads(1)
+    progress && @printf(" on-cluster 2RDM: %d (cluster, sector, root) blocks, %d threads\n", length(jobs), Threads.nthreads())
+    Threads.@threads :dynamic for (I, sector, r, ρ) in jobs
+        ti = time()
+        sol = bases[I][sector]
+        F = eigen(Symmetric(ρ))
+        keep = abs.(F.values) .>= wmin
+        Φ = sol.vectors * F.vectors[:, keep]
+        no = length(v.clusters[I])
+        Gc = cluster_2rdm_gram(no, Int(sector[1]), Int(sector[2]), Φ, F.values[keep])
+        off = offsets[I]
+        lock(lk) do
+            G[off+1:off+no, off+1:off+no, off+1:off+no, off+1:off+no, r] .+= Gc
+            done[] += 1
+            if progress && (done[] % 20 == 0 || done[] == length(jobs) || time() - ti > 30)
+                @printf("  on-cluster %4d/%d  cluster %d sector %s root %d: %d states %.1f s  elapsed %s\n", done[],
+                        length(jobs), I, sector, r, size(Φ, 2), time() - ti, _hms(time() - t0))
+                flush(stdout)
             end
         end
     end

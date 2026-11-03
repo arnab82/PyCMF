@@ -75,12 +75,15 @@ for (i, cb) in enumerate(cluster_bases)
     @printf(" cluster %d: %d Fock sectors, %d cluster states used\n", i, length(cb.basis), sum(values(used[i])))
 end
 
-cluster_ops = TPSChem.compute_cluster_ops(cluster_bases, ints)
 offsets = cumsum([0; [length(c) for c in clusters[1:end-1]]])
+# checkpoints of the 1RDMs and of the inter-cluster 2RDM blocks: with both, the cluster operators are not needed
+out1 = splitext(outfile)[1] * "_1rdm.npz"
+outi = splitext(outfile)[1] * "_inter.npz"
+need_ops = !(isfile(out1) && isfile(outi)) || oncluster == "table"
+cluster_ops = need_ops ? TPSChem.compute_cluster_ops(cluster_bases, ints) : nothing
 
 # 1RDMs first, written before the (long) 2RDM step: <outfile>_1rdm.npz with dm1a, dm1b, dm1 (n, n, R), the natural
 # occupations occ (n, R) and Sz (R,). <S^2> needs the 2RDM: it comes with the second file
-out1 = splitext(outfile)[1] * "_1rdm.npz"
 if isfile(out1)     # from an earlier run on the same state (TPSChem's compute_1rdm takes ~15 min here)
     d = npzread(out1)
     dm1a, dm1b = d["dm1a"], d["dm1b"]
@@ -109,7 +112,19 @@ if oncluster == "table"
 else
     # root-diagonal blocks only: the roots are the spin states S = 0..3, between which the spin-free transition
     # RDMs vanish, and PDFT needs the RDM of each state
-    @time dm2 = intercluster_2rdm(v0a, cluster_ops, offsets)
+    if isfile(outi)
+        d = npzread(outi)
+        maximum(abs.(d["energies"] .- e0a)) < 1e-10 || error("$outi is for another state")
+        dm2 = d["dm2_inter"]
+        @printf(" inter-cluster 2RDM blocks read from %s\n", outi)
+    else
+        @time dm2 = intercluster_2rdm(v0a, cluster_ops, offsets)
+        npzwrite(outi, Dict("energies" => collect(e0a), "dm2_inter" => dm2))
+        @printf(" wrote %s\n", outi)
+    end
+    cluster_ops = nothing
+    GC.gc()
+    flush(stdout)
     @time oncluster_2rdm!(dm2, v0a, cluster_bases, offsets)
 end
 
