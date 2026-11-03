@@ -143,6 +143,29 @@ def energy(cmf, otxc='tPBE', spin_corr=None, rdm12=None, ot=None, grids_level=No
     return e_tot, e_ot
 
 
+def spin_coupled_rdm12(cmf, pair=None) -> dict:
+    """
+    S -> active-space (dm1, dm2) of two open-shell clusters in their cMF states coupled to total spin S, the other
+    clusters in their cMF states (closed form, see `make_rdm12`); `pair` defaults to the two open-shell clusters
+    """
+    spins = cluster_spins(cmf)
+    if pair is None:
+        pair = [i for i, (s, m) in enumerate(spins) if s > 1e-4]
+        if len(pair) != 2:
+            raise ValueError('give the pair of open-shell clusters')
+    a, b = pair
+    sa, sb = spins[a][0], spins[b][0]
+    dm1 = cmf.make_rdm1()
+    n = len(cmf.clusters)
+    rdms = {}
+    for k in range(int(round(2*min(sa, sb))) + 1):
+        s = abs(sa - sb) + k
+        corr = np.zeros((n, n))
+        corr[a, b] = corr[b, a] = pair_spin_correlation(s, sa, sb)
+        rdms[s] = (dm1, make_rdm12(cmf, corr, spins)[1])
+    return rdms
+
+
 def spin_ladder(cmf, pair=None, otxc='tPBE', ot=None, grids_level=None, verbose=None) -> (dict, float):
     """
     cMF-PDFT energies of two open-shell clusters coupled to each total spin S (the other clusters in their cMF
@@ -162,24 +185,12 @@ def spin_ladder(cmf, pair=None, otxc='tPBE', ot=None, grids_level=None, verbose=
         J (Hartree)
     """
     log = logger.new_logger(cmf, verbose)
-    spins = cluster_spins(cmf)
-    if pair is None:
-        pair = [i for i, (s, m) in enumerate(spins) if s > 1e-4]
-        if len(pair) != 2:
-            raise ValueError('give the pair of open-shell clusters')
-    a, b = pair
-    sa, sb = spins[a][0], spins[b][0]
     if ot is None:
         ot = make_ot(cmf.mol, otxc, grids_level)
-    dm1 = cmf.make_rdm1()
-    e_cl = _classical(cmf, dm1)
-    n = len(cmf.clusters)
+    rdms = spin_coupled_rdm12(cmf, pair)
+    e_cl = _classical(cmf, next(iter(rdms.values()))[0])
     energies = {}
-    for k in range(int(round(2*min(sa, sb))) + 1):
-        s = abs(sa - sb) + k
-        corr = np.zeros((n, n))
-        corr[a, b] = corr[b, a] = pair_spin_correlation(s, sa, sb)
-        dm2 = make_rdm12(cmf, corr, spins)[1]
+    for s, (dm1, dm2) in rdms.items():
         energies[s] = e_cl + energy_ot(cmf, ot, dm1, dm2)
         log.info('cMF-PDFT (%s)  S = %.1f  E = %.12f', ot.otxc, s, energies[s])
     s = np.array(sorted(energies))

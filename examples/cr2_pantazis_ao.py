@@ -4,7 +4,8 @@
     cmf     orbital-optimized RO-cMF (all doubly occupied, active and virtual orbitals optimized; trust-region
             Newton by default, since L-BFGS stalls on the soft orbital modes of the AO start)
     qdpt2   spin ladder and exchange coupling J of the two Cr(III) (S = 3/2), H = -2J S_A.S_B
-    pdft    cMF-PT1-PDFT: PDFT (tPBE, ftPBE) on the QDPT2 first-order wave function of each spin state, and J
+    pdft    cMF-PT1-PDFT: PDFT on the QDPT2 first-order wave function of each spin state, and J, for each on-top
+            functional of --functionals (one pass over the grid per state for all of them; default tPBE, ftPBE)
     nevpt2  cMF-NEVPT2 correlation energy of the environment (frozen core), for the total energy
     export  the active-space problem of all clusters for TPSCI (cmf_tpsci.npz, see examples/tpsci_rdms.jl)
     tpsci_pdft  TPSCI and TPSCI-PDFT (tPBE, ftPBE) J from the TPSCI RDMs that tpsci_rdms.jl writes (tpsci_rdms.npz)
@@ -70,6 +71,10 @@ p.add_argument('--max-det', type=float, default=2e7, help='largest determinant s
 p.add_argument('--nevpt2-order', type=int, default=1)
 p.add_argument('--nevpt2-cutoff', type=float, default=None, help='Angstrom, for --nevpt2-order 2')
 p.add_argument('--tpsci-rdms', default='tpsci_rdms.npz', help='RDMs of the TPSCI roots for the tpsci_pdft step')
+p.add_argument('--functionals', default='tPBE,ftPBE',
+               help='on-top functionals for the pdft step, comma separated, e.g. '
+                    'tLDA,ftLDA,tPBE,ftPBE,tBLYP,ftBLYP,trevPBE,ftrevPBE,tOPBE,tM06L,tPBE0,MC23 (hybrids mix in the '
+                    'wave-function energy of each state)')
 args = p.parse_args()
 steps = args.steps.split(',')
 results = {'args': vars(args)}
@@ -159,13 +164,17 @@ if 'qdpt2' in steps:
     save()
 
 if 'pdft' in steps:
-    ots = {x: pdft.make_ot(mol, x, grids_level=args.grids_level) for x in ('tPBE', 'ftPBE')}
-    for x, ot in ots.items():
-        results['j_pdft_spin_coupled_' + x] = pdft.spin_ladder(cmf, ot=ot)[1]*CM
-        log('PDFT on the spin-coupled cMF states (no charge transfer), %s: J = %.2f cm-1' % (x, results['j_pdft_spin_coupled_' + x]))
+    functionals = args.functionals.split(',')
+    scan = pdft.functional_scan(cmf, pdft.spin_coupled_rdm12(cmf), functionals, grids_level=args.grids_level)
+    for x in functionals:
+        results['j_pdft_spin_coupled_' + x] = scan[x][1]*CM
+        log('PDFT on the spin-coupled cMF states (no charge transfer), %s: J = %.2f cm-1' % (x, scan[x][1]*CM))
     rdms = pdft.mbe_rdm12(cmf, subsets)
-    for x, ot in ots.items():
-        energies, j = pdft.mbe_spin_ladder(cmf, ot=ot, rdms=rdms)
+    scan = pdft.functional_scan(cmf, rdms, functionals, grids_level=args.grids_level)
+    results['j_pt1_wfn'] = scan['wfn'][1]*CM
+    log('J of the wave-function energies <H> of the first-order states: %.2f cm-1' % (scan['wfn'][1]*CM))
+    for x in functionals:
+        energies, j = scan[x]
         results['j_pt1_pdft_' + x] = j*CM
         results['e_pt1_pdft_' + x] = {str(s): e for s, e in energies.items()}
         log('cMF-PT1-PDFT %s: J = %.2f cm-1, E(S) %s' % (x, j*CM, ' '.join('S=%.0f:%.8f' % kv for kv in energies.items())))
