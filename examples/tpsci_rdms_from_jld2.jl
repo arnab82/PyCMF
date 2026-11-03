@@ -32,6 +32,14 @@ cmffile, tpscifile, outfile = ARGS[1], ARGS[2], ARGS[3]
 M = parse(Int, get(ENV, "TPSCI_M", "100"))
 delta = parse(Int, get(ENV, "TPSCI_DELTA", "3"))
 oncluster = get(ENV, "TPSCI_ONCLUSTER", "natural")
+# TPSCI_REDIAG=1: diagonalize H again in the configuration space of the saved state, with the rebuilt cluster bases.
+# Needed when those bases differ from the ones of the TPSCI run by the (arbitrary) signs of the cluster states, e.g.
+# another BLAS: the saved coefficients then do not give the eigenvector, but the eigenvectors of H in the same
+# configurations are the same states in the new sign convention, and their energies reproduce e0a
+redo = get(ENV, "TPSCI_REDIAG", "0") == "1"
+# TPSCI_1RDM=trace: spin-summed 1RDMs from the 2RDMs, sum_q G[p,q,r,q] = (N - 1) D[p,r], instead of TPSChem's
+# compute_1rdm (~15 min here); the default with TPSCI_REDIAG=1
+trace1 = get(ENV, "TPSCI_1RDM", redo ? "trace" : "tpschem") == "trace"
 
 # files written by FermiCG (2024) refer to its types and to the then separate QCBase, RDM and InCoreIntegrals packages:
 # map them to TPSChem's (same layout), with the stored type parameters, and leave everything else to JLD2
@@ -79,31 +87,55 @@ offsets = cumsum([0; [length(c) for c in clusters[1:end-1]]])
 # checkpoints of the 1RDMs and of the inter-cluster 2RDM blocks: with both, the cluster operators are not needed
 out1 = splitext(outfile)[1] * "_1rdm.npz"
 outi = splitext(outfile)[1] * "_inter.npz"
-need_ops = !(isfile(out1) && isfile(outi)) || oncluster == "table"
+outs = splitext(outfile)[1] * "_state.jld2"
+need_ops = !((trace1 || isfile(out1)) && isfile(outi)) || oncluster == "table" || (redo && !isfile(outs))
 cluster_ops = need_ops ? TPSChem.compute_cluster_ops(cluster_bases, ints) : nothing
+
+if redo
+    if isfile(outs)
+        v0a, e0a = jldopen(f -> (f["v0a"], f["e0a"]), outs, "r")
+        @printf(" re-diagonalized state read from %s\n", outs)
+    else
+        clustered_ham = TPSChem.extract_ClusteredTerms(ints, clusters)
+        TPSChem.add_cmf_operators!(cluster_ops, cluster_bases, ints, d1.a, d1.b)
+        # direct (matrix-free) Davidson: tps_ci_direct would build the dense H (76 GB for 97k configurations)
+        @time e_new, v_new = TPSChem.tps_ci_davidson(v0a, cluster_ops, clustered_ham, conv_thresh=1e-7, max_iter=200)
+        for r in 1:R
+            @printf(" root %2d  E(saved) = %.10f  E(re-diagonalized) = %.10f  diff %.1e\n", r, e0a[r], e_new[r],
+                    e_new[r] - e0a[r])
+        end
+        maximum(abs.(e_new .- e0a)) < 1e-5 || @warn "re-diagonalized energies differ from the saved ones"
+        jldsave(outs; v0a=v_new, e0a=e_new, e0a_saved=collect(e0a))
+        @printf(" wrote %s\n", outs)
+        v0a, e0a = v_new, e_new
+    end
+    flush(stdout)
+end
 
 # 1RDMs first, written before the (long) 2RDM step: <outfile>_1rdm.npz with dm1a, dm1b, dm1 (n, n, R), the natural
 # occupations occ (n, R) and Sz (R,). <S^2> needs the 2RDM: it comes with the second file
-if isfile(out1)     # from an earlier run on the same state (TPSChem's compute_1rdm takes ~15 min here)
-    d = npzread(out1)
-    dm1a, dm1b = d["dm1a"], d["dm1b"]
-    maximum(abs.(d["energies"] .- e0a)) < 1e-10 || error("$out1 is for another state")
-    @printf(" 1RDMs read from %s\n", out1)
-else
-    @time γ_aa, γ_bb = TPSChem.compute_1rdm(v0a, cluster_ops)
-    dm1a = cat([γ_aa[:, :, r, r] for r in 1:R]..., dims=3)
-    dm1b = cat([γ_bb[:, :, r, r] for r in 1:R]..., dims=3)
+if !trace1
+    if isfile(out1)     # from an earlier run on the same state (TPSChem's compute_1rdm takes ~15 min here)
+        d = npzread(out1)
+        dm1a, dm1b = d["dm1a"], d["dm1b"]
+        maximum(abs.(d["energies"] .- e0a)) < 1e-10 || error("$out1 is for another state")
+        @printf(" 1RDMs read from %s\n", out1)
+    else
+        @time γ_aa, γ_bb = TPSChem.compute_1rdm(v0a, cluster_ops)
+        dm1a = cat([γ_aa[:, :, r, r] for r in 1:R]..., dims=3)
+        dm1b = cat([γ_bb[:, :, r, r] for r in 1:R]..., dims=3)
+    end
+    dm1 = dm1a .+ dm1b
+    occ = hcat([reverse(eigvals(Symmetric(dm1[:, :, r]))) for r in 1:R]...)
+    sz = [0.5 * (tr(dm1a[:, :, r]) - tr(dm1b[:, :, r])) for r in 1:R]
+    for r in 1:R
+        @printf(" root %2d  N = %.6f  Sz = %.4f  natural occupations %s\n", r, tr(dm1[:, :, r]), sz[r],
+                join([@sprintf("%.3f", x) for x in occ[:, r] if 0.02 < x < 1.98], " "))
+    end
+    npzwrite(out1, Dict("energies" => collect(e0a), "dm1a" => dm1a, "dm1b" => dm1b, "dm1" => dm1, "occ" => occ, "sz" => sz))
+    @printf(" wrote %s\n", out1)
+    flush(stdout)
 end
-dm1 = dm1a .+ dm1b
-occ = hcat([reverse(eigvals(Symmetric(dm1[:, :, r]))) for r in 1:R]...)
-sz = [0.5 * (tr(dm1a[:, :, r]) - tr(dm1b[:, :, r])) for r in 1:R]
-for r in 1:R
-    @printf(" root %2d  N = %.6f  Sz = %.4f  natural occupations %s\n", r, tr(dm1[:, :, r]), sz[r],
-            join([@sprintf("%.3f", x) for x in occ[:, r] if 0.02 < x < 1.98], " "))
-end
-npzwrite(out1, Dict("energies" => collect(e0a), "dm1a" => dm1a, "dm1b" => dm1b, "dm1" => dm1, "occ" => occ, "sz" => sz))
-@printf(" wrote %s\n", out1)
-flush(stdout)
 
 if oncluster == "table"
     TPSChem.add_spinfree_2rdm_ops!(cluster_ops, cluster_bases)
@@ -126,6 +158,11 @@ else
     GC.gc()
     flush(stdout)
     @time oncluster_2rdm!(dm2, v0a, cluster_bases, offsets)
+end
+
+if trace1
+    nel = sum(sum(f) for f in init_fspace.config)
+    dm1 = cat([sum(dm2[:, q, :, q, r] for q in 1:n) / (nel - 1) for r in 1:R]..., dims=3)
 end
 
 # E = h0 + sum h1 D1 + 1/2 sum (pq|rs) <p'r'sq>, with <p'r'sq> = G[p,r,q,s]. TPSChem's TPSCI energies leave out h0,
