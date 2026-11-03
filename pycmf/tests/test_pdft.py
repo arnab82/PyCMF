@@ -130,3 +130,27 @@ def test_rdm_expansion():
     assert abs(j_mbe - j_full) < .02*abs(j_full) < abs(j_pair - j_full)
     j_tri = pdft.qdpt2_spin_ladder(cmf, cmf.qdpt2([0, 1, 2], with_rdm=True), ot=ot)[1]
     assert abs(pdft.mbe_spin_ladder(cmf, [(0, 1), (0, 1, 2)], ot=ot)[1] - j_tri) < 1e-10
+
+
+def test_functional_scan_is_mcpdft():
+    """
+    Several on-top functionals in one pass over the grid (LDA, GGA, fully translated, meta-GGA and the hybrids tPBE0
+    and MC23, which mix in the wave-function energy): with one cluster, each equals MC-PDFT of CASCI
+    """
+    mol = gto.M(atom='N 0 0 0; N 0 0 1.15', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    C = mf.mo_coeff
+    cmf = pycmf.CMF(mf)
+    cmf.set_Cdoc(C[:, :4])
+    cmf.set_Cact(C[:, 4:10], [list(range(6))], [(3, 3)])
+    cmf.set_Cvir(C[:, 10:])
+    cmf.ci_conv_tol = 1e-14
+    cmf.conv_tol_rdm1 = 1e-12
+    cmf.cmf_ci()
+    otxcs = ['tLDA', 'ftPBE', 'tBLYP', 'tM06L', 'tPBE0', 'MC23']
+    res = pdft.functional_scan(cmf, {0: pdft.make_rdm12(cmf)}, otxcs, grids_level=2)
+    for x in otxcs:
+        mc = mcpdft.CASCI(mf, x, 6, 6, grids_level=2)
+        mc.fcisolver.conv_tol = 1e-14
+        mc.kernel(C)
+        assert abs(res[x][0][0] - mc.e_tot) < 1e-8, x

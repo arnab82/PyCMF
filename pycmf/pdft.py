@@ -307,6 +307,103 @@ def tpsci_spin_ladder(cmf, filename, clusters=None, otxc='tPBE', ot=None, grids_
     return states, j_ci, j_pdft
 
 
+
+def energies_ot(cmf, ots, dm1, dm2, max_memory=2000) -> np.ndarray:
+    """
+    E_ot[rho, Pi] of several on-top functionals for the same active-space RDMs, in one pass over the grid: the
+    density and on-top pair density are built once, to the derivative order that the most demanding functional needs,
+    and each functional gets the components that `pyscf.mcpdft.otfnal.energy_ot` would give it. The functionals must
+    share one grid; for a hybrid functional this is its on-top part (see `functional_scan`)
+    """
+    from pyscf.mcpdft import _dms
+    from pyscf.mcpdft.otpd import get_ontop_pair_density
+    ot0 = ots[0]
+    for ot in ots[1:]:
+        if ot.grids is not ot0.grids and (ot.grids.weights.shape != ot0.grids.weights.shape
+                                          or abs(ot.grids.weights - ot0.grids.weights).max() > 0):
+            raise ValueError('the on-top functionals must share one grid')
+    Ccore = np.hstack((cmf.Cfrz, cmf.Cdoc))
+    C = np.hstack((Ccore, cmf.Cact))
+    casdm1s = np.array((.5*dm1, .5*dm1))
+    cascm2 = _dms.dm2_cumulant(dm2, casdm1s)
+    dm1s = _dms.casdm1s_to_dm1s(ot0, casdm1s, mo_coeff=C, ncore=Ccore.shape[1], ncas=dm1.shape[0])
+    rank = {'LDA': 0, 'GGA': 1, 'MGGA': 2}
+    xctype = max((ot.xctype for ot in ots), key=rank.get)
+    dens_deriv = max(ot.dens_deriv for ot in ots)
+    pi_deriv = max(ot.Pi_deriv for ot in ots)
+    ni = ot0._numint
+    make_rho = [ni._gen_rho_evaluator(cmf.mol, dm1s[i], hermi=1, with_lapl=False)[0] for i in range(2)]
+    e = np.zeros(len(ots))
+    for ao, mask, weight, _ in ni.block_loop(cmf.mol, ot0.grids, C.shape[0], dens_deriv, max_memory):
+        rho = np.asarray([m(0, ao, mask, xctype) for m in make_rho])
+        if rho.ndim == 2:
+            rho = rho[:, None]
+        pi = get_ontop_pair_density(ot0, rho, ao, cascm2, cmf.Cact, pi_deriv, mask)
+        for k, ot in enumerate(ots):
+            # rho [2, components, grid] and Pi [components, grid], the leading components each functional uses
+            nr = {'LDA': 1, 'GGA': 4}.get(ot.xctype, rho.shape[1])
+            e[k] += ot.eval_ot(rho[:, :nr], pi[:(1, 4, 5)[ot.Pi_deriv]], dderiv=0, weights=weight)[0].dot(weight)
+    return e
+
+
+def functional_scan(cmf, rdms, otxcs, grids_level=None, verbose=None) -> dict:
+    """
+    PDFT spin ladders for several on-top functionals on the same states, e.g. the QDPT2 first-order states from
+    `mbe_rdm12`: one pass over the grid per state for all functionals (`energies_ot`).
+
+    Hybrid on-top functionals (e.g. tPBE0, MC23) mix in the wave-function energy of each state, from its RDMs and the
+    active-space Hamiltonian of all clusters, as pyscf.mcpdft does: E = E_cl + lambda (E_wfn - E_cl) + E_ot, with
+    E_cl = V_nn + tr(D h) + 1/2 tr(D J[D]) and E_ot the (scaled) on-top part.
+
+    Parameters
+    ----------
+    rdms : dict
+        S -> (dm1, dm2) of all active orbitals (spin-summed 1RDM, spin-free 2RDM), e.g. from `mbe_rdm12`
+    otxcs : list
+        On-top functionals, e.g. ['tLDA', 'tPBE', 'ftPBE', 'tBLYP', 'tM06L', 'MC23']
+
+    Returns
+    -------
+    dict
+        otxc -> (energies {S: E}, J), and 'wfn' -> the same for the wave-function energies E_wfn of the states;
+        J of H = -2J S_A.S_B in Hartree
+    """
+    log = logger.new_logger(cmf, verbose)
+    ots = [otfnal.get_transfnal(cmf.mol, x) for x in otxcs]
+    if grids_level is not None:
+        ots[0].grids.level = grids_level
+    ots[0].grids.build()
+    for ot in ots[1:]:
+        ot.grids = ots[0].grids
+    lam = []
+    for ot in ots:
+        hyb_x, hyb_c = ot._numint.rsh_and_hybrid_coeff(ot.otxc, cmf.mol.spin)[2]
+        if abs(hyb_x - hyb_c) > 1e-10:
+            raise NotImplementedError('different hybridization of exchange and correlation in %s' % ot.otxc)
+        lam.append(hyb_x)
+    h0, h1, h2, orbs = cmf.get_active_hamiltonian()
+    ix1, ix2 = np.ix_(orbs, orbs), np.ix_(orbs, orbs, orbs, orbs)
+    spins = sorted(rdms)
+    out = {x: {} for x in list(otxcs) + ['wfn']}
+    for s in spins:
+        dm1, dm2 = rdms[s]
+        e_cl = _classical(cmf, dm1)
+        e_wfn = h0 + np.einsum('pq,pq', h1, dm1[ix1]) + .5*np.einsum('pqrs,pqrs', h2, dm2[ix2])
+        e_ot = energies_ot(cmf, ots, dm1, dm2, getattr(cmf.mf, 'max_memory', 2000))
+        out['wfn'][s] = e_wfn
+        for x, l, eo in zip(otxcs, lam, e_ot):
+            out[x][s] = e_cl + l*(e_wfn - e_cl) + eo
+        log.info('S = %g: E_wfn = %.10f  %s', s, e_wfn, '  '.join('%s %.10f' % (x, out[x][s]) for x in otxcs))
+    sv = np.array(spins, dtype=float)
+    A = np.vstack((np.ones_like(sv), -sv*(sv + 1))).T
+    result = {}
+    for x, energies in out.items():
+        j = np.linalg.lstsq(A, np.array([energies[s] for s in spins]), rcond=None)[0][1]
+        result[x] = (energies, j)
+        log.note('%-8s J = %8.2f cm-1', x, j*219474.6313705)
+    return result
+
+
 def mbe_rdm12(cmf, subsets, order=1, verbose=None, **kwargs) -> dict:
     """
     Active-space RDMs of the spin states from a many-body expansion over sets of clusters, e.g. the two magnetic
