@@ -378,6 +378,16 @@ With the defaults (def2-SVP, all 665 orbitals optimized, |g| < 1e-4, 4 cores):
 | cMF-PT1-PDFT, Cr–Cr pair (tPBE / ftPBE) | -31.20 / -31.30 cm⁻¹ |
 | cMF-NEVPT2 (order 1, 37 frozen core orbitals) | -4.249134 Eh, total -3348.457268 Eh |
 
+On-top functionals on the same PT1 states (`--functionals`, all evaluated in one pass over the grid per state with
+`pdft.functional_scan`), J in cm⁻¹:
+
+| tLDA / ftLDA | tPBE / ftPBE | tBLYP / ftBLYP | trevPBE / ftrevPBE | tOPBE | tM06L | tPBE0 | MC23 | ⟨H⟩ of the PT1 states |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| -30.69 / -32.27 | -31.20 / -31.30 | -30.42 / -32.67 | -30.91 / -30.29 | -28.93 | -28.21 | -27.48 | -29.63 | -16.30 |
+
+The pure functionals span -28 to -33 cm⁻¹; the hybrids mix in the wave-function J (tPBE0 = 0.25 × (-16.30) + 0.75 ×
+(-31.20)).
+
 The `export` and `tpsci_pdft` steps run TPSCI (TPSChem.jl, `examples/tpsci_rdms.jl`) and TPSCI-PDFT in the same
 active space and orbitals, which separates the error of the first-order wave function and of the missing bridges from
 that of the functional.
