@@ -80,9 +80,17 @@ offsets = cumsum([0; [length(c) for c in clusters[1:end-1]]])
 
 # 1RDMs first, written before the (long) 2RDM step: <outfile>_1rdm.npz with dm1a, dm1b, dm1 (n, n, R), the natural
 # occupations occ (n, R) and Sz (R,). <S^2> needs the 2RDM: it comes with the second file
-@time γ_aa, γ_bb = TPSChem.compute_1rdm(v0a, cluster_ops)
-dm1a = cat([γ_aa[:, :, r, r] for r in 1:R]..., dims=3)
-dm1b = cat([γ_bb[:, :, r, r] for r in 1:R]..., dims=3)
+out1 = splitext(outfile)[1] * "_1rdm.npz"
+if isfile(out1)     # from an earlier run on the same state (TPSChem's compute_1rdm takes ~15 min here)
+    d = npzread(out1)
+    dm1a, dm1b = d["dm1a"], d["dm1b"]
+    maximum(abs.(d["energies"] .- e0a)) < 1e-10 || error("$out1 is for another state")
+    @printf(" 1RDMs read from %s\n", out1)
+else
+    @time γ_aa, γ_bb = TPSChem.compute_1rdm(v0a, cluster_ops)
+    dm1a = cat([γ_aa[:, :, r, r] for r in 1:R]..., dims=3)
+    dm1b = cat([γ_bb[:, :, r, r] for r in 1:R]..., dims=3)
+end
 dm1 = dm1a .+ dm1b
 occ = hcat([reverse(eigvals(Symmetric(dm1[:, :, r]))) for r in 1:R]...)
 sz = [0.5 * (tr(dm1a[:, :, r]) - tr(dm1b[:, :, r])) for r in 1:R]
@@ -90,7 +98,6 @@ for r in 1:R
     @printf(" root %2d  N = %.6f  Sz = %.4f  natural occupations %s\n", r, tr(dm1[:, :, r]), sz[r],
             join([@sprintf("%.3f", x) for x in occ[:, r] if 0.02 < x < 1.98], " "))
 end
-out1 = splitext(outfile)[1] * "_1rdm.npz"
 npzwrite(out1, Dict("energies" => collect(e0a), "dm1a" => dm1a, "dm1b" => dm1b, "dm1" => dm1, "occ" => occ, "sz" => sz))
 @printf(" wrote %s\n", out1)
 flush(stdout)
