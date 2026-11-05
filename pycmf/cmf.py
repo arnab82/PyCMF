@@ -1492,6 +1492,26 @@ class CMF(lib.StreamObject):
         h2 = _eri_block(eri_act, orbs)
         return h0, h1, h2, orbs
 
+    def orbital_entropies(self) -> list:
+        """Natural orbitals, occupations and single-orbital entropies of each cluster, see
+        `pycmf.active_space.orbital_entropies`
+        """
+        from .active_space import orbital_entropies
+        return orbital_entropies(self)
+
+    def select_active_space(self, occ_thresh=0.02, entropy_thresh=None, dm1=None, verbose=None) -> dict:
+        """Choose the correlated natural orbitals of each cluster, see `pycmf.active_space.select_active_space`
+        """
+        from .active_space import select_active_space
+        return select_active_space(self, occ_thresh, entropy_thresh, dm1, verbose)
+
+    def reduce_active_space_(self, sel) -> None:
+        """Make a selection of `select_active_space` the active space (then run `kernel` again), see
+        `pycmf.active_space.reduce_active_space_`
+        """
+        from .active_space import reduce_active_space_
+        reduce_active_space_(self, sel)
+
     def qdpt2(self, clusters=None, fspaces=None, **kwargs):
         """Quasi-degenerate PT2 for a few clusters in the mean field of the others, see `pycmf.pt2.qdpt2`
         """

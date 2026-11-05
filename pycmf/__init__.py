@@ -9,7 +9,7 @@ from .helpers import *
 from .cmf import *
 from .pt2 import QDPT2Result, qdpt2, pair_pt2, pt2_mbe, product_ci, cluster_centroids, cluster_subsets, mbe_increments
 from .mrpt import nevpt2, nevpt2_mbe
-from . import grad, pdft
+from . import grad, pdft, active_space
 
 
 try:
