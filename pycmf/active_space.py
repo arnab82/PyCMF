@@ -109,7 +109,8 @@ def orbital_entropies(cmf, rdms=None) -> list:
     return out
 
 
-def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdms=None, verbose=None) -> dict:
+def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdms=None, diff_rdms=None,
+                        imp_thresh=1e-6, verbose=None) -> dict:
     """
     Choose the orbitals of each cluster to keep active
 
@@ -125,6 +126,11 @@ def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdm
     rdms : list of (d1a, d1b, d2ab)
         Cluster-block RDMs (see `orbital_entropies`) for the natural orbitals, occupations and entropies, e.g. of
         psi0 + psi1 from examples/tps_pt1_cluster_rdms.jl via `load_cluster_rdms`
+    diff_rdms : (rdms_a, rdms_b)
+        Cluster-block RDMs of two states, e.g. the lowest and highest spin state of a spin ladder: also keep the
+        natural orbitals that carry their difference, importance_k = sum_j |dn_j| <k|j>^2 >= imp_thresh, with dn_j, |j>
+        the eigenpairs of the cluster block of D_a - D_b (see `difference_orbitals`). Small energy differences such
+        as exchange couplings depend on orbitals whose occupations are far below any occupation threshold.
 
     Returns
     -------
@@ -141,6 +147,7 @@ def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdm
     if dm1 is not None and rdms is not None:
         raise ValueError('give dm1 or rdms, not both')
     ent = orbital_entropies(cmf, rdms)
+    diff = difference_orbitals(cmf, *diff_rdms) if diff_rdms is not None else None
     clusters, fspace, Cact, Cdoc, Cvir, table, removed = [], [], [], [], [], [], []
     n0 = 0
     for i, ci in enumerate(cmf.clusters):
@@ -152,6 +159,11 @@ def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdm
             C, s = cmf.Cact[:, ci] @ U, None
         dist = np.minimum(occ, 2 - occ)
         keep = dist >= occ_thresh
+        imp = None
+        if diff is not None:
+            Uc = cmf.Cact[:, ci].T @ cmf.S @ C                                  # natural orbitals in the cluster basis
+            imp = (Uc.T @ diff[i]['U'])**2 @ abs(diff[i]['dn'])
+            keep |= imp >= imp_thresh
         if entropy_thresh is not None and s is not None:
             keep |= s >= entropy_thresh
         doc = ~keep & (occ > 1)
@@ -162,8 +174,8 @@ def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdm
         if na < 0 or nb < 0 or na > nk or nb > nk:
             raise ValueError('cluster %d: %d alpha and %d beta electrons do not fit in the %d kept orbitals; '
                              'lower occ_thresh' % (i, na, nb, nk))
-        table.append([(occ[k], None if s is None else s[k], 'act' if keep[k] else ('doc' if doc[k] else 'vir'))
-                      for k in range(len(ci))])
+        table.append([(occ[k], None if s is None else s[k], 'act' if keep[k] else ('doc' if doc[k] else 'vir'),
+                       None if imp is None else imp[k]) for k in range(len(ci))])
         Cdoc.append(C[:, doc])
         Cvir.append(C[:, vir])
         if nk == 0:
@@ -186,11 +198,12 @@ def print_selection(cmf, sel, log=None):
     """Table of the natural orbitals of each cluster: occupation, entropy and where each one goes"""
     if log is None:
         log = logger.new_logger(cmf, logger.NOTE)
-    log.note('active-space selection: cluster, natural occupations (entropy) -> act | doc | vir')
+    log.note('active-space selection: cluster, natural occupations (entropy) [importance] -> act | doc | vir')
     for i, rows in enumerate(sel['table']):
         log.note('cluster %d %s:', i, tuple(cmf.fspace[i]))
-        for occ, s, where in rows:
-            log.note('    %8.5f  %s  %s', occ, '        ' if s is None else '%8.5f' % s, where)
+        for occ, s, where, imp in rows:
+            log.note('    %8.5f  %s  %s  %s', occ, '        ' if s is None else '%8.5f' % s,
+                     '         ' if imp is None else '%9.2e' % imp, where)
     nact = sel['Cact'].shape[1]
     log.note('selected: (%de, %do) in %d clusters %s (from (%de, %do)); %d orbitals -> doubly occupied, %d -> virtual',
              sum(map(sum, sel['fspace'])), nact, len(sel['clusters']), [len(c) for c in sel['clusters']],
@@ -203,7 +216,7 @@ def reduce_active_space_(cmf, sel) -> None:
     occupied and virtual spaces (so ooCMF optimizes them with the others), and the cluster 1RDMs start from the
     natural occupations of the kept orbitals. Run `cmf.kernel()` afterwards to optimize the orbitals again
     """
-    occ = [np.array([o for o, _, w in rows if w == 'act']) for i, rows in enumerate(sel['table'])
+    occ = [np.array([r[0] for r in rows if r[2] == 'act']) for i, rows in enumerate(sel['table'])
            if i not in sel['removed']]
     cmf.set_Cdoc(np.hstack((cmf.Cdoc, sel['Cdoc_add'])))
     cmf.set_Cvir(np.hstack((sel['Cvir_add'], cmf.Cvir)))

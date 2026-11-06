@@ -140,3 +140,21 @@ def test_roots_and_difference_orbitals(be2, tmp_path):
         dD = sum(blocks[2, i]) - sum(blocks[1, i])
         assert np.allclose(x['U'] @ np.diag(x['dn']) @ x['U'].T, dD)
         assert np.all(np.diff(abs(x['dn'])) <= 1e-12)
+
+
+def test_selection_by_state_difference(be2):
+    """A weakly occupied orbital that carries the difference of two states is kept by its importance; without the
+    difference it is dropped"""
+    rdms = []
+    for i, ci in enumerate(be2.clusters):
+        (a, b), (_, ab, _) = fci.direct_spin1.make_rdm12s(be2.ci[i], len(ci), tuple(be2.fspace[i]))
+        rdms.append((a, b, ab))
+    ent = be2.orbital_entropies(rdms)
+    sel0 = be2.select_active_space(occ_thresh=0.05, rdms=rdms)
+    k = [n for n, r in enumerate(sel0['table'][0]) if r[2] == 'vir'][-1]    # weakest virtual of cluster 0
+    u = ent[0]['U'][:, k]
+    other = [(a + 1e-4*np.outer(u, u), b, ab) if i == 0 else (a, b, ab) for i, (a, b, ab) in enumerate(rdms)]
+    sel = be2.select_active_space(occ_thresh=0.05, rdms=rdms, diff_rdms=(other, rdms), imp_thresh=1e-5)
+    assert sel['table'][0][k][2] == 'act' and abs(sel['table'][0][k][3] - 1e-4) < 1e-8
+    assert [r[2] for r in sel['table'][1]] == [r[2] for r in sel0['table'][1]]
+    assert sel['Cact'].shape[1] == sel0['Cact'].shape[1] + 1

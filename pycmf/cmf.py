@@ -1499,11 +1499,12 @@ class CMF(lib.StreamObject):
         from .active_space import orbital_entropies
         return orbital_entropies(self, rdms)
 
-    def select_active_space(self, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdms=None, verbose=None) -> dict:
+    def select_active_space(self, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdms=None, diff_rdms=None,
+                            imp_thresh=1e-6, verbose=None) -> dict:
         """Choose the correlated natural orbitals of each cluster, see `pycmf.active_space.select_active_space`
         """
         from .active_space import select_active_space
-        return select_active_space(self, occ_thresh, entropy_thresh, dm1, rdms, verbose)
+        return select_active_space(self, occ_thresh, entropy_thresh, dm1, rdms, diff_rdms, imp_thresh, verbose)
 
     def reduce_active_space_(self, sel) -> None:
         """Make a selection of `select_active_space` the active space (then run `kernel` again), see
