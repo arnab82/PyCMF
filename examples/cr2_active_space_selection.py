@@ -4,14 +4,18 @@ Active-space selection with cMF for [Cr2(OH)3(tmtacn)2]3+ (Pantazis geometry, de
     big       ooCMF in a generous AO-cluster space: Cr 3d4d4s4p (3 electrons each, antiparallel M_s) and the
               2s2p3s3p of the three bridging O (closed shell): (30e, 52o). The orbitals of the doubly occupied and
               virtual spaces are optimized with the active ones (trust-region Newton).
-    pt1       first-order correlation between the two Cr clusters (QDPT2 of the Cr-Cr pair, the clusters treated
-              together), as the 1RDM of a many-body expansion that has only that pair (Cr-O pairs, 22 orbitals and
-              1e9 determinants, are beyond the determinant-space QDPT2); also J of the big space
-    select    natural occupations and single-orbital entropies of each cluster (cMF), and occupations of the cluster
-              blocks of the PT1 1RDM; keep the orbitals with min(n, 2 - n) >= --occ-thresh, fold the others into
-              the doubly occupied / virtual spaces
-    reduced   ooCMF in the selected active space, and J from QDPT2 of the Cr-Cr pair, to compare with the big space
-              and with the (24e, 38o) space of cr2_pantazis_ao.py (J = -16.45 cm-1 there)
+    select    natural occupations and single-orbital entropies of each cluster (cMF: the correlation within each
+              cluster, exactly); keep the orbitals with min(n, 2 - n) >= --occ-thresh, fold the others into the
+              doubly occupied / virtual spaces
+    reduced   ooCMF in the selected active space; J from QDPT2 of the Cr-Cr pair (compare with the (24e, 38o) space
+              of cr2_pantazis_ao.py, J = -16.45 cm-1); natural occupations of the cluster blocks of the PT1 1RDM of
+              the Cr-Cr pair, which add the correlation between the two Cr: orbitals that it pushes across
+              --occ-thresh show where the cMF-only selection is too tight or too loose
+
+With --big-pt1 the PT1 1RDM of the Cr-Cr pair is computed in the big space and used for the selection, with J of the big
+space. That needs QDPT2 of the 14-orbital Cr clusters, whose largest Fock sectors (3e+2e, 33124 determinants) are too
+large to diagonalize: QDPT2 then falls back to the iterative 'cmf' partition in the 1e7-determinant space of the pair,
+hours on 4 cores. The Cr-O pairs (22 orbitals, 1e9 determinants) are beyond the determinant-space QDPT2 either way.
 
     python cr2_active_space_selection.py --rohf-chk /path/to/rohf.chk     # rohf.chk of cr2_pantazis_ao.py
 
@@ -34,7 +38,7 @@ p.add_argument('--cr-shells', nargs='+', default=['3d', '4d', '4s', '4p'])
 p.add_argument('--o-shells', nargs='+', default=['2s', '2p', '3s', '3p'])
 p.add_argument('--guess', default='spade', choices=['ao', 'spade'])
 p.add_argument('--occ-thresh', type=float, default=0.02)
-p.add_argument('--no-pt1', action='store_true', help='select from the cMF occupations only')
+p.add_argument('--big-pt1', action='store_true', help='PT1 1RDM and J of the big space (slow, see above)')
 p.add_argument('--conv-tol-grad', type=float, default=1e-5)
 p.add_argument('--max-memory', type=int, default=12000)
 args = p.parse_args()
@@ -79,9 +83,9 @@ e_big = cmf.kernel()
 log('big ooCMF E = %.10f  converged %s' % (e_big, cmf.converged))
 res['e_big'] = e_big
 
-# ---------------------------------------------------------------- PT1 between the Cr and J of the big space
+# ---------------------------------------------------------------- optional: PT1 between the Cr and J of the big space
 dm1 = None
-if not args.no_pt1:
+if args.big_pt1:
     if os.path.exists('pt1_dm1_big.npz'):                      # checkpoint
         d = np.load('pt1_dm1_big.npz')
         dm1, e2 = d['dm1'], float(d['e2'])
@@ -91,10 +95,10 @@ if not args.no_pt1:
         np.savez('pt1_dm1_big.npz', dm1=dm1, e2=e2)
     log('PT1 (Cr-Cr pair): E = %.10f' % e2)
     res['e_pt2_crcr_big'] = e2
-j, r = j_pair(cmf)
-log('big space: J = %.2f cm-1, levels (cm-1) %s' % (j, ' '.join('S=%.0f:%.1f' % (s, (e - min(r.energies)) * CM)
-                                                          for e, s in sorted(zip(r.energies, r.spins)))))
-res['j_big'] = j
+    j, r = j_pair(cmf)
+    log('big space: J = %.2f cm-1 (partition %s), levels (cm-1) %s' % (
+        j, r.partition, ' '.join('S=%.0f:%.1f' % (s, (e - min(r.energies)) * CM) for e, s in sorted(zip(r.energies, r.spins)))))
+    res['j_big'] = j
 
 # ---------------------------------------------------------------- select
 sel = cmf.select_active_space(occ_thresh=args.occ_thresh, dm1=dm1, verbose=4)
@@ -117,8 +121,21 @@ e_red = cmf.kernel()
 log('reduced ooCMF E = %.10f  converged %s  (big - reduced: %.2e Eh)' % (e_red, cmf.converged, e_big - e_red))
 res['e_reduced'] = e_red
 j, r = j_pair(cmf)
-log('reduced space: J = %.2f cm-1, levels (cm-1) %s' % (j, ' '.join('S=%.0f:%.1f' % (s, (e - min(r.energies)) * CM)
-                                                              for e, s in sorted(zip(r.energies, r.spins)))))
-res['j_reduced'] = j
+log('reduced space: J = %.2f cm-1 (partition %s), levels (cm-1) %s' % (
+    j, r.partition, ' '.join('S=%.0f:%.1f' % (s, (e - min(r.energies)) * CM) for e, s in sorted(zip(r.energies, r.spins)))))
+res['j_reduced'], res['j_reduced_partition'] = j, r.partition
+
+# ---------------------------------------------------------------- PT1 occupations of the selected space (diagnostic)
+e2, inc, dm1, _ = cmf.pt2_mbe(subsets=[(0, 1)], with_rdm=True)
+log('PT1 (Cr-Cr pair) in the reduced space: E = %.10f' % e2)
+ent = cmf.orbital_entropies()
+res['reduced'] = []
+for i, ci in enumerate(cmf.clusters):
+    occ = np.sort(np.linalg.eigvalsh(dm1[np.ix_(ci, ci)]))[::-1]
+    near = [x for x in occ if min(x, 2 - x) < 2 * args.occ_thresh]
+    log('cluster %d %s: cMF occupations %s; PT1 %s%s' % (
+        i, tuple(cmf.fspace[i]), np.round(ent[i]['occ'], 4).tolist(), np.round(occ, 4).tolist(),
+        ('  (%d within 2x the threshold)' % len(near)) if near else ''))
+    res['reduced'].append({'occ_cmf': ent[i]['occ'].tolist(), 'occ_pt1': occ.tolist()})
 old = json.load(open('selection.json')) if os.path.exists('selection.json') else []
 json.dump(old + [res], open('selection.json', 'w'), indent=1, default=float)
