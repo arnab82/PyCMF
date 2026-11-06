@@ -467,3 +467,86 @@ function oncluster_2rdm!(G, v::TPSChem.TPSCIstate{T,N,R}, bases, offsets; wmin=1
     end
     return G
 end
+
+"""
+    cluster_rdm12s_gram(no, na, nb, Φ, w) -> (d1a, d1b, d2ab)
+
+Spin-resolved 1RDMs and the alpha-beta 2RDM, sum_k w_k <phi_k|...|phi_k>, in PySCF's conventions:
+d1a[p,q] = <p_a' q_a> = <a_pa phi|a_qa phi>, d2ab[p,q,r,s] = <p_a' r_b' s_b q_a> = <X_pr|X_qs> with
+X_ab = a_aa a_bb phi (the constant sign of moving past the alpha operators cancels in the Gram matrix)
+"""
+function cluster_rdm12s_gram(no, na, nb, Φ::AbstractMatrix{T}, w::AbstractVector{T}) where T
+    da, db = binomial(no, na), binomial(no, nb)
+    d1a, d1b, Mab = zeros(T, no, no), zeros(T, no, no), zeros(T, no * no, no * no)
+    a1 = na >= 1 ? _annihilations(no, na) : nothing
+    b1 = nb >= 1 ? _annihilations(no, nb) : nothing
+    for k in axes(Φ, 2)
+        wk = w[k]
+        φ = reshape(view(Φ, :, k), da, db)
+        if na >= 1
+            X = zeros(T, binomial(no, na - 1), db, no)
+            @inbounds for I in 1:da, (p, J, s) in a1[I], Ib in 1:db
+                X[J, Ib, p] += s * φ[I, Ib]
+            end
+            X = reshape(X, :, no)
+            mul!(d1a, X', X, wk, one(T))
+        end
+        if nb >= 1
+            X = zeros(T, da, binomial(no, nb - 1), no)
+            @inbounds for I in 1:db, (p, J, s) in b1[I], Ia in 1:da
+                X[Ia, J, p] += s * φ[Ia, I]
+            end
+            X = reshape(X, :, no)
+            mul!(d1b, X', X, wk, one(T))
+        end
+        if na >= 1 && nb >= 1
+            X = zeros(T, binomial(no, na - 1), binomial(no, nb - 1), no * no)
+            @inbounds for Ib in 1:db, (b, Jb, sb) in b1[Ib], Ia in 1:da, (a, Ja, sa) in a1[Ia]
+                X[Ja, Jb, a + (b - 1) * no] += sa * sb * φ[Ia, Ib]
+            end
+            X = reshape(X, :, no * no)
+            mul!(Mab, X', X, wk, one(T))
+        end
+    end
+    d2ab = zeros(T, no, no, no, no)
+    @inbounds for s in 1:no, r in 1:no, q in 1:no, p in 1:no
+        d2ab[p, q, r, s] = Mab[p + (r - 1) * no, q + (s - 1) * no]
+    end
+    return d1a, d1b, d2ab
+end
+
+"""
+    cluster_block_rdms(v, bases, root=1; wmin=1e-14) -> Vector of (d1a, d1b, d2ab)
+
+The RDMs of each cluster's own orbitals for one root of a TPSCI state, from the cluster density matrices
+(diagonalized into natural cluster states in each Fock sector) and `cluster_rdm12s_gram`
+"""
+function cluster_block_rdms(v::TPSChem.TPSCIstate{T,N,R}, bases, root=1; wmin=1e-14) where {T,N,R}
+    out = []
+    for ci in v.clusters
+        I, no = ci.idx, length(ci)
+        rho = Dict{Tuple{Int16,Int16},Matrix{T}}()
+        for (fock, configs) in v.data
+            m = size(bases[I][fock[I]].vectors, 2)
+            ρ = get!(() -> zeros(T, m, m), rho, fock[I])
+            groups = Dict{Vector{Int16},Vector{Pair{Int16,T}}}()
+            for (config, coeff) in configs
+                push!(get!(groups, [config[k] for k in 1:N if k != I], Pair{Int16,T}[]), config[I] => coeff[root])
+            end
+            for list in values(groups), (u, cu) in list, (w, cw) in list
+                ρ[u, w] += cu * cw
+            end
+        end
+        d1a, d1b, d2ab = zeros(T, no, no), zeros(T, no, no), zeros(T, no, no, no, no)
+        for (sector, ρ) in rho
+            F = eigen(Symmetric(ρ))
+            keep = abs.(F.values) .>= wmin
+            any(keep) || continue
+            Φ = bases[I][sector].vectors * F.vectors[:, keep]
+            a, b, ab = cluster_rdm12s_gram(no, Int(sector[1]), Int(sector[2]), Φ, F.values[keep])
+            d1a .+= a; d1b .+= b; d2ab .+= ab
+        end
+        push!(out, (d1a, d1b, d2ab))
+    end
+    return out
+end

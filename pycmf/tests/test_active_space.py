@@ -92,3 +92,26 @@ def test_selection_from_pt1_rdm():
     assert sel['fspace'] == [(1, 1), (1, 1)]
     with pytest.raises(ValueError):
         cmf.select_active_space(occ_thresh=1.5)
+
+
+def test_external_cluster_rdms(be2, tmp_path):
+    """Block RDMs passed in (here the cMF ones, through the npz format of tps_pt1_cluster_rdms.jl) give the same
+    occupations, entropies and selection as the cMF default; wrong sizes are rejected"""
+    out = {}
+    for i, ci in enumerate(be2.clusters):
+        (a, b), (_, ab, _) = fci.direct_spin1.make_rdm12s(be2.ci[i], len(ci), tuple(be2.fspace[i]))
+        for tag in ('', '0'):
+            out['d1a%s_%d' % (tag, i+1)], out['d1b%s_%d' % (tag, i+1)], out['d2ab%s_%d' % (tag, i+1)] = a, b, ab
+    np.savez(tmp_path / 'blocks.npz', **out)
+    rdms = pycmf.active_space.load_cluster_rdms(tmp_path / 'blocks.npz')
+    assert len(rdms) == len(be2.clusters)
+    for x, y in zip(be2.orbital_entropies(), be2.orbital_entropies(rdms)):
+        assert np.allclose(x['occ'], y['occ'], atol=1e-12) and np.allclose(x['entropy'], y['entropy'], atol=1e-12)
+    s0, s1 = be2.select_active_space(occ_thresh=0.01), be2.select_active_space(occ_thresh=0.01, rdms=rdms)
+    assert s0['fspace'] == s1['fspace'] and [[r[2] for r in t] for t in s0['table']] == [[r[2] for r in t] for t in s1['table']]
+    with pytest.raises(ValueError):
+        be2.orbital_entropies(rdms[:1])
+    with pytest.raises(ValueError):
+        be2.orbital_entropies([(np.eye(2), np.eye(2), np.zeros((2,)*4))]*2)
+    with pytest.raises(ValueError):
+        be2.select_active_space(dm1=np.eye(be2.Cact.shape[1]), rdms=rdms)

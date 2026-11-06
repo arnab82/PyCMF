@@ -14,9 +14,11 @@ Measures (per cluster natural orbital):
 * natural occupation n and single-orbital entropy s = -sum_k w_k ln w_k, with w_k the probabilities of the orbital
   being empty, alpha, beta or doubly occupied (as in autoCAS, Stein and Reiher, JCTC 12, 1760 (2016)). From the cMF
   cluster RDMs these contain the correlation within each cluster exactly and none between clusters.
-* with `dm1`, e.g. the 1RDM of `pt2_mbe(..., with_rdm=True)`, the natural orbitals and occupations come from the
-  cluster blocks of that 1RDM instead, which adds the first-order correlation between clusters (charge transfer,
-  superexchange, dispersion-like pair correlation).
+* with `rdms`, cluster-block RDMs of a correlated wavefunction, e.g. psi0 + psi1 of first-order perturbation theory in
+  the cluster-state basis (examples/tps_pt1_cluster_rdms.jl, read with `load_cluster_rdms`): occupations and entropies
+  that include the correlation between clusters (charge transfer, superexchange, ligand donation), for any cluster size.
+* with `dm1`, e.g. the 1RDM of `pt2_mbe(..., with_rdm=True)` (determinant space of each subset of clusters: small
+  clusters only), the natural orbitals and occupations come from the cluster blocks of that 1RDM.
 
 An orbital is kept when its occupation is at least `occ_thresh` away from 0 and 2 (so singly occupied orbitals are
 always kept), or, with `entropy_thresh`, when its entropy is at least that; otherwise it becomes doubly occupied
@@ -27,10 +29,27 @@ from pyscf import fci, lib
 from pyscf.lib import logger
 
 
-def orbital_entropies(cmf) -> list:
+def load_cluster_rdms(filename, reference=False) -> list:
+    """
+    Cluster-block RDMs written by examples/tps_pt1_cluster_rdms.jl: list of (d1a, d1b, d2ab) per cluster, of the
+    normalized psi0 + psi1 (or of psi0 alone with `reference`)
+    """
+    d = np.load(filename)
+    tag = '0' if reference else ''
+    n = len([k for k in d.files if k.startswith('d1a_')])
+    return [(d['d1a%s_%d' % (tag, i)], d['d1b%s_%d' % (tag, i)], d['d2ab%s_%d' % (tag, i)]) for i in range(1, n + 1)]
+
+
+def orbital_entropies(cmf, rdms=None) -> list:
     """
     Natural orbitals of each cluster with their occupations and single-orbital entropies, from the cMF cluster
-    wavefunctions (the state selected with `select_state` for a state average)
+    wavefunctions (the state selected with `select_state` for a state average), or from given cluster-block RDMs
+
+    Parameters
+    ----------
+    rdms : list of (d1a, d1b, d2ab), optional
+        Per cluster, spin-resolved 1RDMs and alpha-beta 2RDM in PySCF's convention (d2ab[p,q,r,s] = <p_a' r_b' s_b q_a>),
+        in the cluster's active orbitals, e.g. from `load_cluster_rdms`
 
     Returns
     -------
@@ -41,12 +60,19 @@ def orbital_entropies(cmf) -> list:
         U : (n, n) natural orbitals in the basis of the cluster's active orbitals (columns)
         C : (nao, n) natural orbitals in the AO basis
     """
-    if any(c is None for c in cmf.ci):
+    if rdms is None and any(c is None for c in cmf.ci):
         cmf.cmf_ci()
+    if rdms is not None and len(rdms) != len(cmf.clusters):
+        raise ValueError('%d cluster RDMs for %d clusters' % (len(rdms), len(cmf.clusters)))
     out = []
     for i, ci in enumerate(cmf.clusters):
         norb, nelec = len(ci), tuple(cmf.fspace[i])
-        (d1a, d1b), (_, d2ab, _) = fci.direct_spin1.make_rdm12s(cmf.ci[i], norb, nelec)
+        if rdms is None:
+            (d1a, d1b), (_, d2ab, _) = fci.direct_spin1.make_rdm12s(cmf.ci[i], norb, nelec)
+        else:
+            d1a, d1b, d2ab = rdms[i]
+            if d1a.shape != (norb, norb):
+                raise ValueError('cluster %d: RDM of %d orbitals, the cluster has %d' % (i, d1a.shape[0], norb))
         occ, U = np.linalg.eigh(d1a + d1b)
         occ, U = occ[::-1], U[:, ::-1]
         na = np.einsum('pi,pq,qi->i', U, d1a, U)
@@ -61,7 +87,7 @@ def orbital_entropies(cmf) -> list:
     return out
 
 
-def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, verbose=None) -> dict:
+def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdms=None, verbose=None) -> dict:
     """
     Choose the orbitals of each cluster to keep active
 
@@ -74,6 +100,9 @@ def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, ver
     dm1 : np.ndarray
         Spin-summed 1RDM of the active orbitals (nact, nact) to take the natural orbitals and occupations of each
         cluster from (its diagonal block), e.g. from `pt2_mbe(with_rdm=True)`; default: the cMF cluster RDMs
+    rdms : list of (d1a, d1b, d2ab)
+        Cluster-block RDMs (see `orbital_entropies`) for the natural orbitals, occupations and entropies, e.g. of
+        psi0 + psi1 from examples/tps_pt1_cluster_rdms.jl via `load_cluster_rdms`
 
     Returns
     -------
@@ -87,7 +116,9 @@ def select_active_space(cmf, occ_thresh=0.02, entropy_thresh=None, dm1=None, ver
     if cmf.sa_states is not None:
         raise NotImplementedError('active-space selection for a state average')
     log = logger.new_logger(cmf, verbose)
-    ent = orbital_entropies(cmf)
+    if dm1 is not None and rdms is not None:
+        raise ValueError('give dm1 or rdms, not both')
+    ent = orbital_entropies(cmf, rdms)
     clusters, fspace, Cact, Cdoc, Cvir, table, removed = [], [], [], [], [], [], []
     n0 = 0
     for i, ci in enumerate(cmf.clusters):

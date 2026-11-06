@@ -1492,18 +1492,18 @@ class CMF(lib.StreamObject):
         h2 = _eri_block(eri_act, orbs)
         return h0, h1, h2, orbs
 
-    def orbital_entropies(self) -> list:
+    def orbital_entropies(self, rdms=None) -> list:
         """Natural orbitals, occupations and single-orbital entropies of each cluster, see
         `pycmf.active_space.orbital_entropies`
         """
         from .active_space import orbital_entropies
-        return orbital_entropies(self)
+        return orbital_entropies(self, rdms)
 
-    def select_active_space(self, occ_thresh=0.02, entropy_thresh=None, dm1=None, verbose=None) -> dict:
+    def select_active_space(self, occ_thresh=0.02, entropy_thresh=None, dm1=None, rdms=None, verbose=None) -> dict:
         """Choose the correlated natural orbitals of each cluster, see `pycmf.active_space.select_active_space`
         """
         from .active_space import select_active_space
-        return select_active_space(self, occ_thresh, entropy_thresh, dm1, verbose)
+        return select_active_space(self, occ_thresh, entropy_thresh, dm1, rdms, verbose)
 
     def reduce_active_space_(self, sel) -> None:
         """Make a selection of `select_active_space` the active space (then run `kernel` again), see
