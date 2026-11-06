@@ -1,6 +1,8 @@
 # First-order (PT1) correlation between clusters in the cluster-state basis, for active-space selection with cMF
-# (pycmf.active_space): the cluster-block RDMs of psi0 + psi1, with psi0 the cMF product state and psi1 its first-order
-# correction (TPSChem.compute_pt1_wavefunction, cMF H0, first-order interacting space), without determinants.
+# (pycmf.active_space): the cluster-block RDMs of psi0 + psi1, with psi0 the lowest state of the spin-complete
+# reference space (cluster ground states in the reference Fock sector and its spin-flip partners) and psi1 its
+# first-order correction (cMF H0, first-order interacting space of TPSChem, reference space projected out), without
+# determinants. TPSPT1_SHIFT: level shift of the denominators (default 0).
 #
 #   julia --project=/path/to/TPSChem.jl -t auto tps_pt1_cluster_rdms.jl cmf_export.npz pt1_blocks.npz
 #
@@ -42,13 +44,34 @@ clustered_ham = TPSChem.extract_ClusteredTerms(ints, clusters)
 TPSChem.add_cmf_operators!(cluster_ops, cluster_bases, ints, d1.a, d1.b)
 flush(stdout)
 
+# psi0: lowest state of the spin-complete reference space (cluster ground states in the reference Fock sector and its
+# spin-flip partners, e.g. (2,1)(1,2) for (3,0)(0,3)): the spin-flip configurations have the same H0 energy as the
+# reference, so they must be in the reference space, not in the first-order space (intruders)
 ref = TPSChem.TPSCIstate(clusters, init_fspace, R=1)
+ref = TPSChem.add_spin_focksectors(ref)
 TPSChem.eye!(ref)
-@time e2, psi1 = TPSChem.compute_pt1_wavefunction(ref, cluster_ops, clustered_ham, H0="Hcmf", nbody=nbody,
-                                                  thresh_foi=thresh_foi)
+e_ref, psi0 = TPSChem.tps_ci_direct(ref, cluster_ops, clustered_ham)
+@printf(" reference space: %d configurations, E(psi0) = %.10f\n", length(psi0), e_ref[1])
+
+# first-order wavefunction with cMF H0: psi1 = sum_k |k> <k|H|psi0> / (E0 - E0_k), k outside the reference space
+@time sig = TPSChem.open_matvec_thread(psi0, cluster_ops, clustered_ham, nbody=nbody, thresh=thresh_foi)
+TPSChem.project_out!(sig, ref)
+clustered_ham_0 = TPSChem.extract_1body_operator(clustered_ham, op_string="Hcmf")
+Hd = TPSChem.compute_diagonal(sig, cluster_ops, clustered_ham_0)
+E0 = TPSChem.compute_expectation_value_parallel(psi0, cluster_ops, clustered_ham_0)[1]
+shift = parse(Float64, get(ENV, "TPSPT1_SHIFT", "0.0"))
+den = E0 .- Hd .- shift
+small = abs.(den) .< 1e-6
+sv = TPSChem.get_vector(sig)[:, 1]
+v1 = ifelse.(small, 0.0, sv ./ ifelse.(small, 1.0, den))
+e2 = [sum(sv .* v1)]
+any(small) && @printf(" %d first-order configurations within 1e-6 Eh of E0 skipped (largest |<k|H|0>| %.2e)\n",
+                      count(small), maximum(abs.(sv[small])))
+psi1 = deepcopy(sig)
+TPSChem.set_vector!(psi1, reshape(v1, :, 1))
 nfois = length(psi1)
 psi = deepcopy(psi1)
-TPSChem.add!(psi, ref)
+TPSChem.add!(psi, psi0)
 nrm = TPSChem.norm(psi)
 TPSChem.scale!(psi, 1 / nrm[1])
 @printf(" PT1: %d configurations in the first-order interacting space, E2 = %.10f, |psi0 + psi1| = %.6f\n",
@@ -57,7 +80,7 @@ flush(stdout)
 
 out = Dict{String,Any}("e2" => collect(e2), "nfois" => [nfois], "norm" => [nrm[1]])
 @time blocks = cluster_block_rdms(psi, cluster_bases)
-blocks0 = cluster_block_rdms(ref, cluster_bases)
+blocks0 = cluster_block_rdms(psi0, cluster_bases)
 for i in 1:nclus
     a, b, ab = blocks[i]
     a0, b0, ab0 = blocks0[i]
