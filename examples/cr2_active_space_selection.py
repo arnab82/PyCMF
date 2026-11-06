@@ -16,7 +16,7 @@ Active-space selection with cMF for [Cr2(OH)3(tmtacn)2]3+ (Pantazis geometry, de
     python cr2_active_space_selection.py --rohf-chk /path/to/rohf.chk     # rohf.chk of cr2_pantazis_ao.py
 
 Results are appended to selection.json, the ooCMF iterations to pycmf.log; the orbitals of each ooCMF are saved after every iteration
-(cmf_big.npy, cmf_reduced.npy), so the steps resume. J is for H = -2J S_A.S_B.
+(cmf_big.npy, cmf_reduced.npy) and the PT1 1RDM to pt1_dm1_big.npz, so the steps resume. J is for H = -2J S_A.S_B.
 """
 import argparse, json, os, time
 import numpy as np
@@ -82,7 +82,13 @@ res['e_big'] = e_big
 # ---------------------------------------------------------------- PT1 between the Cr and J of the big space
 dm1 = None
 if not args.no_pt1:
-    e2, inc, dm1, _ = cmf.pt2_mbe(subsets=[(0, 1)], with_rdm=True)
+    if os.path.exists('pt1_dm1_big.npz'):                      # checkpoint
+        d = np.load('pt1_dm1_big.npz')
+        dm1, e2 = d['dm1'], float(d['e2'])
+        log('PT1 1RDM from pt1_dm1_big.npz')
+    else:
+        e2, inc, dm1, _ = cmf.pt2_mbe(subsets=[(0, 1)], with_rdm=True)
+        np.savez('pt1_dm1_big.npz', dm1=dm1, e2=e2)
     log('PT1 (Cr-Cr pair): E = %.10f' % e2)
     res['e_pt2_crcr_big'] = e2
 j, r = j_pair(cmf)
@@ -104,6 +110,9 @@ res['selected'] = {'fspace': cmf.fspace, 'clusters': [len(c) for c in cmf.cluste
 
 # ---------------------------------------------------------------- reduced
 cmf.chkfile = 'cmf_reduced.npy'
+if os.path.exists('cmf_reduced.npy') and np.load('cmf_reduced.npy').shape == cmf.get_mo_coeffs().shape:
+    cmf.set_mo_coeffs(np.load('cmf_reduced.npy'))
+    log('reduced orbitals from cmf_reduced.npy')
 e_red = cmf.kernel()
 log('reduced ooCMF E = %.10f  converged %s  (big - reduced: %.2e Eh)' % (e_red, cmf.converged, e_big - e_red))
 res['e_reduced'] = e_red
