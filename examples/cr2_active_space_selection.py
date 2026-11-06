@@ -39,6 +39,16 @@ p.add_argument('--o-shells', nargs='+', default=['2s', '2p', '3s', '3p'])
 p.add_argument('--guess', default='spade', choices=['ao', 'spade'])
 p.add_argument('--occ-thresh', type=float, default=0.02)
 p.add_argument('--big-pt1', action='store_true', help='PT1 1RDM and J of the big space (slow, see above)')
+p.add_argument('--tps-pt1', default=None,
+               help='cluster-block RDMs of the big space from tps_pt1_cluster_rdms.jl (TPSPT1_NROOTS=4): natural orbitals '
+                    'of --nat-root, and orbitals that carry the difference of --diff-roots are kept (--imp-thresh)')
+p.add_argument('--nat-root', type=int, default=4, help='root of the reference space for the natural orbitals (S=0: 4)')
+p.add_argument('--diff-roots', type=int, nargs=2, default=[4, 1], help='two roots (S=0, S=3: 4 1)')
+p.add_argument('--imp-thresh', type=float, default=1e-6)
+p.add_argument('--skip-big', action='store_true',
+               help='cmf_big.npy is converged: only solve the cluster states (no orbital optimization, less memory)')
+p.add_argument('--algorithm', default='newton', choices=['newton', 'lbfgs'],
+               help='ooCMF optimizer (L-BFGS needs much less memory than the Newton caches)')
 p.add_argument('--conv-tol-grad', type=float, default=1e-5)
 p.add_argument('--max-memory', type=int, default=12000)
 args = p.parse_args()
@@ -68,7 +78,7 @@ nel_o = (2 if any(s == '2s' for s in args.o_shells) else 0) + (6 if any(s == '2p
 fspace = [(3, 0), (0, 3)] + [(nel_o // 2, nel_o // 2)] * 3
 cmf = pycmf.CMF(mf)
 cmf.set_clusters_from_ao(labels, fspace, guess=args.guess)
-cmf.algorithm = 'newton'
+cmf.algorithm = args.algorithm
 cmf.conv_tol_grad = args.conv_tol_grad
 cmf.verbose, cmf.stdout = 4, open('pycmf.log', 'a')        # ooCMF iterations
 cmf.chkfile = 'cmf_big.npy'
@@ -79,7 +89,11 @@ log('big active space: (%de, %do), clusters %s, %d doubly occupied, %d virtual' 
     sum(map(sum, fspace)), cmf.Cact.shape[1], [len(c) for c in cmf.clusters], cmf.Cdoc.shape[1], cmf.Cvir.shape[1]))
 
 # ---------------------------------------------------------------- big
-e_big = cmf.kernel()
+if args.skip_big:
+    e_big = cmf.cmf_ci()
+    cmf.e_tot, cmf.converged = e_big, True
+else:
+    e_big = cmf.kernel()
 log('big ooCMF E = %.10f  converged %s' % (e_big, cmf.converged))
 res['e_big'] = e_big
 
@@ -101,7 +115,14 @@ if args.big_pt1:
     res['j_big'] = j
 
 # ---------------------------------------------------------------- select
-sel = cmf.select_active_space(occ_thresh=args.occ_thresh, dm1=dm1, verbose=4)
+if args.tps_pt1:
+    from pycmf.active_space import load_cluster_rdms
+    rdms = load_cluster_rdms(args.tps_pt1, root=args.nat_root)
+    diff = tuple(load_cluster_rdms(args.tps_pt1, root=r) for r in args.diff_roots)
+    sel = cmf.select_active_space(occ_thresh=args.occ_thresh, rdms=rdms, diff_rdms=diff, imp_thresh=args.imp_thresh,
+                                  verbose=4)
+else:
+    sel = cmf.select_active_space(occ_thresh=args.occ_thresh, dm1=dm1, verbose=4)
 ent = cmf.orbital_entropies()
 res['big'] = [{'occ_cmf': e['occ'].tolist(), 'entropy': e['entropy'].tolist(),
                'occ_selection': [r[0] for r in t], 'where': [r[2] for r in t]} for e, t in zip(ent, sel['table'])]
