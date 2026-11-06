@@ -24,10 +24,13 @@ and after. Output: the selected active space and its orbitals (`cmf_reduced.npy`
 
 ## 2. M dependence of TPSCI and TPSCI-PDFT
 
-`TPSCI_M` = 25, 50, 100, 150 (and `TPSCI_THRESH_CIPSI` 1e-3 .. 2e-4 at the largest M that fits), same space and orbitals.
-Report J(TPSCI var), J(TPSCI + PT2) and J(TPSCI-PDFT) per functional against M. PDFT should converge faster in M than the
-wavefunction J; if it does not, the on-top densities are not converged. Memory grows with M (~12 GB at M = 100 for 97k
-configurations): M >= 150 belongs on the local machine.
+M is the number of cluster states kept in each Fock sector of each cluster: it only enters the post-cMF TPSCI step. ooCMF,
+the selection, QDPT2 and PT1-PDFT do not depend on it (QDPT2 works in the determinant space of the clusters), so the scan
+reruns only cluster bases -> TPSCI -> RDMs -> TPSCI-PDFT, on one fixed active space and set of orbitals (from step 0).
+`TPSCI_M` = 25, 50, 100, 150 (and `TPSCI_THRESH_CIPSI` 1e-3 .. 2e-4 at the largest M that fits). Report J(TPSCI var),
+J(TPSCI + PT2) and J(TPSCI-PDFT) per functional against M. PDFT should converge faster in M than the wavefunction J; if it
+does not, the on-top densities are not converged. Memory: the cluster operators grow ~M^2 per pair of Fock sectors (~12 GB
+at M = 100 for the 97k-configuration Faraday state), so the small-M runs fit here and M >= 150 belongs on the local machine.
 
 ## 3. Basis set
 
