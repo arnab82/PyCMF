@@ -29,15 +29,37 @@ from pyscf import fci, lib
 from pyscf.lib import logger
 
 
-def load_cluster_rdms(filename, reference=False) -> list:
+def load_cluster_rdms(filename, reference=False, root=1) -> list:
     """
     Cluster-block RDMs written by examples/tps_pt1_cluster_rdms.jl: list of (d1a, d1b, d2ab) per cluster, of the
-    normalized psi0 + psi1 (or of psi0 alone with `reference`)
+    normalized psi0 + psi1 of reference-space root `root` (1-based; or of psi0 alone with `reference`)
     """
     d = np.load(filename)
     tag = '0' if reference else ''
-    n = len([k for k in d.files if k.startswith('d1a_')])
-    return [(d['d1a%s_%d' % (tag, i)], d['d1b%s_%d' % (tag, i)], d['d2ab%s_%d' % (tag, i)]) for i in range(1, n + 1)]
+    suffix = '' if root == 1 else '_r%d' % root
+    n = len([k for k in d.files if k.startswith('d1a_') and k.count('_') == 1])
+    return [(d['d1a%s_%d%s' % (tag, i, suffix)], d['d1b%s_%d%s' % (tag, i, suffix)], d['d2ab%s_%d%s' % (tag, i, suffix)])
+            for i in range(1, n + 1)]
+
+
+def difference_orbitals(cmf, rdms_a, rdms_b) -> list:
+    """
+    Difference natural orbitals of two states for each cluster: eigenvectors of the cluster block of
+    D_a - D_b (spin-summed 1RDMs), e.g. of the highest and lowest spin state of a spin ladder, whose orbitals with
+    large |eigenvalue| respond differently in the two states (the orbitals that carry an exchange coupling)
+
+    Returns
+    -------
+    list of dict per cluster: dn (n,) eigenvalues sorted by decreasing |dn|, U (n, n) in the cluster's active
+    orbitals, C (nao, n) in the AO basis
+    """
+    out = []
+    for i, ci in enumerate(cmf.clusters):
+        dD = (rdms_a[i][0] + rdms_a[i][1]) - (rdms_b[i][0] + rdms_b[i][1])
+        dn, U = np.linalg.eigh(dD)
+        order = np.argsort(-abs(dn))
+        out.append({'dn': dn[order], 'U': U[:, order], 'C': cmf.Cact[:, ci] @ U[:, order]})
+    return out
 
 
 def orbital_entropies(cmf, rdms=None) -> list:

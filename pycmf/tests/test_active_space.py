@@ -115,3 +115,28 @@ def test_external_cluster_rdms(be2, tmp_path):
         be2.orbital_entropies([(np.eye(2), np.eye(2), np.zeros((2,)*4))]*2)
     with pytest.raises(ValueError):
         be2.select_active_space(dm1=np.eye(be2.Cact.shape[1]), rdms=rdms)
+
+
+def test_roots_and_difference_orbitals(be2, tmp_path):
+    """Root-suffixed blocks are read by root; the difference orbitals of two states diagonalize D_a - D_b"""
+    rng = np.random.default_rng(3)
+    out, blocks = {}, {}
+    for r, suffix in ((1, ''), (2, '_r2')):
+        for i, ci in enumerate(be2.clusters):
+            n = len(ci)
+            a = rng.standard_normal((n, n)); a = a @ a.T
+            b = rng.standard_normal((n, n)); b = b @ b.T
+            blocks[r, i] = (a, b)
+            for tag in ('', '0'):
+                out['d1a%s_%d%s' % (tag, i+1, suffix)], out['d1b%s_%d%s' % (tag, i+1, suffix)] = a, b
+                out['d2ab%s_%d%s' % (tag, i+1, suffix)] = np.zeros((n,)*4)
+    np.savez(tmp_path / 'roots.npz', **out)
+    r1 = pycmf.active_space.load_cluster_rdms(tmp_path / 'roots.npz', root=1)
+    r2 = pycmf.active_space.load_cluster_rdms(tmp_path / 'roots.npz', root=2)
+    assert len(r1) == len(be2.clusters)
+    for i in range(len(be2.clusters)):
+        assert np.allclose(r2[i][0], blocks[2, i][0]) and np.allclose(r1[i][1], blocks[1, i][1])
+    for i, x in enumerate(pycmf.active_space.difference_orbitals(be2, r2, r1)):
+        dD = sum(blocks[2, i]) - sum(blocks[1, i])
+        assert np.allclose(x['U'] @ np.diag(x['dn']) @ x['U'].T, dD)
+        assert np.all(np.diff(abs(x['dn'])) <= 1e-12)
