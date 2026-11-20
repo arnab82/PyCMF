@@ -39,14 +39,30 @@ Long-axis slip 1.2 A only: couplings vanish by symmetry. Long 1.2 + short 0.8 A:
 | L-PDFT tPBE | 1.67 | 1.41 | 2.75 | -0.10 | 2.9 |
 | L-PDFT tPBE0 | 2.33 | 2.19 | 2.98 | -0.04 | 8.8 |
 
+| NEVPT2-dressed | 2.59 | 2.84 | 2.98 | (10.1) | (-0.5) |
+
 Experiment (tetracene): S1 ~2.3-2.4 eV, 2 T1 ~2.5 eV, CT above S1.
+
+SC-NEVPT2 (`nevpt2_reference.py`) on the same 9 CASCI singlets (= the TPSCI singlets, energies to 1e-7), excitation
+energies in eV, CASCI root order (characters from TPSCI: GS, TT 0.98, LE 0.97, LE/CT 64/34, CT 0.93, CT/LE 61/35,
+3 x other):
+
+| | GS | TT | LE | LE/CT | CT | CT/LE | other |
+|---|---|---|---|---|---|---|---|
+| CASCI | 0 | 3.646 | 4.137 | 4.384 | 4.569 | 4.627 | 5.21-5.44 |
+| SC-NEVPT2 | 0 | 2.98 | 2.52 | 2.55 | 2.93 | 2.87 | 3.44-4.34 |
+
+"NEVPT2-dressed": diabatization of diag(E_NEVPT2) in the CASCI states. Its diabatic energies are meaningful; its
+couplings (in parentheses) are not, as different state-specific shifts of slightly mixed states create spurious
+off-diagonal elements of this size: a coupling reference needs multistate PT (QD-NEVPT2, XMS-CASPT2).
 
 ## Status
 
 - In every method the CT-mediated coupling is 1-2 orders of magnitude larger than the direct one at this geometry,
   but its size and sign depend on where the method puts the CT states.
-- L-PDFT with translated functionals in this minimal space: LE good with tPBE0 (2.33 eV), TT 0.2-0.5 eV too high,
-  CT below LE (tPBE 0.26 eV, tPBE0 0.14 eV below). With CT below LE the superexchange formula does not apply (CT is a
-  real intermediate), so the mechanism verdict hinges on the CT energetics.
-- Next: SC-NEVPT2 reference on the same CASCI states (functional vs active-space error), larger frontier spaces
-  (`--nfront 3, 4`), ooCMF orbitals, crystal geometry.
+- Against NEVPT2 on the same states: L-PDFT tPBE0 has TT right (2.98 = 2.98 eV; TT above experiment is an active-space
+  / orbital limit, not the functional), LE 0.26 eV low, and CT 0.65 eV too low (tPBE: 1.4 eV), which puts CT below LE
+  (NEVPT2: 0.25 eV above). The CT error of the translated functionals is what flips and inflates the mediated coupling;
+  with CT below LE the superexchange formula does not apply (CT is a real intermediate).
+- Next: the CT energetics of PDFT (functional scan incl. MC23; larger frontier spaces `--nfront 3, 4`, where the ions
+  can relax; ooCMF orbitals), a multistate wavefunction reference for the couplings, then the crystal geometry.
