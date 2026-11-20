@@ -16,19 +16,24 @@ import numpy as np
 from pyscf import gto, scf, lib, mcpdft, fci
 import pycmf
 from pycmf.lpdft import lpdft_from_cmf
+from pycmf.diabatic import diabatize, sf_couplings
+
+EV = 27.211386245988
 
 p = argparse.ArgumentParser(description=__doc__.split('\n\n')[0], formatter_class=argparse.RawDescriptionHelpFormatter)
 p.add_argument('step', choices=['prepare', 'analyze'])
 p.add_argument('--out', default='ed')
 p.add_argument('--distance', type=float, default=3.5, help='stacking distance (Angstrom)')
+p.add_argument('--slip', type=float, default=0.0, help='slip of the second monomer along the C=C axis (Angstrom)')
 p.add_argument('--basis', default='6-31g')
 p.add_argument('--functionals', default='tPBE,ftPBE,tBLYP,tPBE0')
 args = p.parse_args()
 os.makedirs(args.out, exist_ok=True)
 
-R = args.distance
+R, z = args.distance, args.slip
 mol = gto.M(atom=f'''C 0 0 0.667; C 0 0 -0.667; H 0 0.923 1.237; H 0 -0.923 1.237; H 0 0.923 -1.237; H 0 -0.923 -1.237;
-C {R} 0 0.667; C {R} 0 -0.667; H {R} 0.923 1.237; H {R} -0.923 1.237; H {R} 0.923 -1.237; H {R} -0.923 -1.237''',
+C {R} 0 {0.667+z}; C {R} 0 {-0.667+z}; H {R} 0.923 {1.237+z}; H {R} -0.923 {1.237+z}; H {R} 0.923 {-1.237+z};
+H {R} -0.923 {-1.237+z}''',
             basis=args.basis, verbose=0)
 mf = scf.RHF(mol).density_fit()
 chk = os.path.join(args.out, 'rhf.chk')
@@ -95,4 +100,26 @@ for otxc in args.functionals.split(','):
         otxc, np.round(eL, 8), np.round(np.sort(lm.e_states), 8), abs(eL - np.sort(lm.e_states)).max()))
     print('       mixing of the TPSCI singlets in the L-PDFT states (|U|^2):\n%s' % np.round(U**2, 3))
     out[otxc] = {'e': eL.tolist(), 'e_forge': np.sort(lm.e_states).tolist(), 'H': H.tolist()}
+# ---------------------------------------------------------------- diabatic LE / CT / TT analysis
+names = open(os.path.join(args.out, 'states_classes.txt')).read().split()
+Wsing = d['class_weights'][np.ix_(singlets, singlets)]
+
+
+def report(label, Hmodel):
+    dn, D, Hd, w = diabatize(Wsing, names, Hmodel)
+    e0 = Hd[dn.index('GS'), dn.index('GS')] if 'GS' in dn else 0
+    print('%s diabats (class weight before orthonormalization): %s' % (label, ', '.join('%s %.3f' % x for x in zip(dn, w))))
+    print('   diabatic energies (eV above GS): %s' % ', '.join('%s %.3f' % (k, (Hd[i, i] - e0) * EV) for i, k in enumerate(dn)))
+    for c in sf_couplings(dn, Hd):
+        print('   %s -> %s: direct %8.2f meV, CT-mediated %8.2f meV (%s)' % (
+            c['le'], c['tt'], c['direct'] * EV * 1e3, c['mediated'] * EV * 1e3,
+            ', '.join('%s %.2f' % (k, v * EV * 1e3) for k, v in c['terms'].items())))
+    return {'diabats': dn, 'Hd_eV': (Hd * EV).tolist(), 'couplings_meV': [
+        {k: (v * EV * 1e3 if k in ('direct', 'mediated') else v) for k, v in c.items() if k != 'terms'}
+        for c in sf_couplings(dn, Hd)]}
+
+
+out['diabatic'] = {'wfn': report('TPSCI', np.diag(e[singlets]))}
+for otxc in args.functionals.split(','):
+    out['diabatic'][otxc] = report('L-PDFT ' + otxc, np.array(out[otxc]['H']))
 json.dump(out, open(os.path.join(args.out, 'lpdft.json'), 'w'), indent=1)

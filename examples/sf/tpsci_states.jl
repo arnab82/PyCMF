@@ -8,7 +8,8 @@
 # Output: energies (R,) with h0, s2 (R,), pairs (P, 2) 1-based root pairs (I <= J; I = J are the state RDMs), and per
 # channel dm1 (n, n, P) and dm2 (n, n, n, n, P), spin-free, TPSChem convention G[p,q,r,s] = <p'q'sr>, transition
 # channels symmetrized ((G_IJ + G_JI) / 2), in the orbital order of the export; cluster_bases and the state go to
-# <states>.jld2.
+# <states>.jld2. With one cluster per chromophore: class_weights (R, R, K) = sum over the configurations of each
+# diabatic class (GS, LE_i, CT_i_j, TT_i_j, other; names in <states>_classes.txt) of c_I c_J.
 using TPSChem
 using TPSChem.QCBase
 using TPSChem.InCoreIntegrals
@@ -75,7 +76,59 @@ for (ch, (I, J)) in enumerate(pairs)
     ref = I == J ? e0[I] + ints.h0 : 0.0
     @printf(" <%d|H|%d> from RDMs %.10f (TPSCI %.10f, diff %.1e)\n", I, J, w, ref, w - ref)
 end
+# ---------------------------------------------------------------- diabatic character (one cluster per chromophore)
+# label the cluster states: G ground, S1 lowest singlet-like excitation of the neutral sector (not degenerate with a
+# state of the (n+1, n-1) sector, i.e. not an Ms = 0 component of a triplet or quintet), T lowest triplet (all Ms
+# components), A / Cn anion / cation ground (both Ms); configurations -> GS, LE_i, CT_i_j (i anion, j cation),
+# TT_i_j, T_i (local triplet), other; W[k][I, J] = sum over the configurations of class k of c_I c_J
+function cluster_labels(cb, ref; tol=1e-6)
+    na, nb = Int(ref[1]), Int(ref[2])
+    sec(a, b) = (Int16(a), Int16(b))
+    en(a, b) = haskey(cb.basis, sec(a, b)) ? cb.basis[sec(a, b)].energies : Float64[]
+    lab = Dict{Tuple{Tuple{Int16,Int16},Int},Symbol}()
+    lab[(sec(na, nb), 1)] = :G
+    hs = en(na + 1, nb - 1)
+    if !isempty(hs)
+        for (a, b) in ((na + 1, nb - 1), (na, nb), (na - 1, nb + 1)), (k, e) in enumerate(en(a, b))
+            abs(e - hs[1]) < tol && (lab[(sec(a, b), k)] = :T)
+        end
+    end
+    for (k, e) in enumerate(en(na, nb))
+        k == 1 && continue
+        any(abs(e - h) < tol for h in hs) && continue
+        lab[(sec(na, nb), k)] = :S1
+        break
+    end
+    for (a, b) in ((na + 1, nb), (na, nb + 1)); isempty(en(a, b)) || (lab[(sec(a, b), 1)] = :A); end
+    for (a, b) in ((na - 1, nb), (na, nb - 1)); isempty(en(a, b)) || (lab[(sec(a, b), 1)] = :Cn); end
+    return lab
+end
+labels = [cluster_labels(cluster_bases[i], init_fspace[i]) for i in 1:nclus]
+function config_class(fock, config)
+    l = [get(labels[i], ((Int16(fock[i][1]), Int16(fock[i][2])), Int(config[i])), :X) for i in 1:nclus]
+    rest(idx...) = all(l[k] == :G for k in 1:nclus if !(k in idx))
+    all(==(:G), l) && return "GS"
+    s1, t, a, c = findall(==(:S1), l), findall(==(:T), l), findall(==(:A), l), findall(==(:Cn), l)
+    length(s1) == 1 && rest(s1[1]) && return "LE_$(s1[1])"
+    length(a) == 1 && length(c) == 1 && rest(a[1], c[1]) && return "CT_$(a[1])_$(c[1])"
+    length(t) == 2 && rest(t...) && return "TT_$(t[1])_$(t[2])"
+    length(t) == 1 && rest(t[1]) && return "T_$(t[1])"
+    return "other"
+end
+W = Dict{String,Matrix{Float64}}()
+for (fock, configs) in v0.data, (config, coeff) in configs
+    k = config_class(fock, config)
+    w = get!(() -> zeros(nroots, nroots), W, k)
+    w .+= coeff * coeff'
+end
+cnames = sort(collect(keys(W)))
+for r in 1:nroots
+    @printf(" root %2d character: %s\n", r, join(["$k $(round(W[k][r, r], digits=3))" for k in cnames if W[k][r, r] > 0.005], ", "))
+end
+open(splitext(outfile)[1] * "_classes.txt", "w") do f
+    foreach(k -> println(f, k), cnames)
+end
 npzwrite(outfile, Dict("energies" => collect(e0) .+ ints.h0, "s2" => s2, "pairs" => hcat([[p[1], p[2]] for p in pairs]...)',
-                       "dm1" => D, "dm2" => G))
+                       "dm1" => D, "dm2" => G, "class_weights" => cat([W[k] for k in cnames]..., dims=3)))
 jldsave(splitext(outfile)[1] * ".jld2"; v0, e0, cluster_bases, s2)
 @printf(" wrote %s (%d channels)\n", outfile, length(pairs))
