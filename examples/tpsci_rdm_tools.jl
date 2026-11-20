@@ -142,7 +142,10 @@ operator; the block is then scattered into G with the roles and signs of TPSChem
 configuration pair is n_k R instead of prod_a n_a for each root pair
 """
 function _combination_2rdm_fast!(G::Array{T,5}, v::TPSChem.TPSCIstate{T,N,R}, cluster_ops, offsets,
-                                 term_clusters) where {T,N,R}
+                                 term_clusters; pairs=nothing) where {T,N,R}
+    # channels: pairs (I, J) of roots, weight c_I(bra) c_J(ket) -> <I|p'q'sr|J>; default the roots themselves
+    prs = pairs === nothing ? [(r, r) for r in 1:R] : pairs
+    P = length(prs)
     roles0 = [1, 2, 3, 4]  # p, q, s, r
     perm, countswap = TPSChem.bubble_sort(term_clusters)
     sorted_clusters = term_clusters[perm]
@@ -223,11 +226,11 @@ function _combination_2rdm_fast!(G::Array{T,5}, v::TPSChem.TPSCIstate{T,N,R}, cl
                         key = _enc(key, s_act[a] + (t_act[a] - 1) * mb[a])
                     end
                     pl = s_act[last] + (t_act[last] - 1) * mb[last]
-                    y = get!(() -> zeros(T, nl * R), Y, key)
-                    @inbounds for r in 1:R
-                        w = c_bra[r] * c_ket[r]
+                    y = get!(() -> zeros(T, nl * P), Y, key)
+                    @inbounds for (ch, (I, J)) in enumerate(prs)
+                        w = c_bra[I] * c_ket[J]
                         iszero(w) && continue
-                        o = (r - 1) * nl
+                        o = (ch - 1) * nl
                         @simd for f in 1:nl
                             y[o+f] += Olast[f, pl] * w
                         end
@@ -236,7 +239,7 @@ function _combination_2rdm_fast!(G::Array{T,5}, v::TPSChem.TPSCIstate{T,N,R}, cl
             end
             isempty(Y) && continue
             # levels k-1 .. 2: fold O_order(j) into Y, removing p_order(j) from the key
-            L = nl * R          # length of the trailing (f_>j, r) block
+            L = nl * P          # length of the trailing (f_>j, channel) block
             for j in k-1:-1:2
                 a = order[j]
                 na, Oa = nf[a], ops[a]
@@ -262,7 +265,7 @@ function _combination_2rdm_fast!(G::Array{T,5}, v::TPSChem.TPSCIstate{T,N,R}, cl
             dims = [nf[order[j]] for j in 1:k]
             role_orbs = zeros(Int, 4)
             fidx = zeros(Int, k)
-            @inbounds for r in 1:R, lin in 1:prod(dims)
+            @inbounds for r in 1:P, lin in 1:prod(dims)
                 val = block[(r - 1) * prod(dims) + lin]
                 iszero(val) && continue
                 x = lin - 1
@@ -285,13 +288,27 @@ function _combination_2rdm_fast!(G::Array{T,5}, v::TPSChem.TPSCIstate{T,N,R}, cl
 end
 
 """
-    intercluster_2rdm(v, cluster_ops, offsets; progress=true) -> G (n, n, n, n, R)
+    symmetrize_transition!(G)
+
+(G + G') / 2 for transition 2RDM channels, G'[p,q,r,s] = G[r,s,p,q] (<J|p'q'sr|I> = <I|r's'qp|J> for real states)
+"""
+function symmetrize_transition!(G::AbstractArray{T,4}) where T
+    G .= .5 .* (G .+ permutedims(G, (3, 4, 1, 2)))
+    return G
+end
+
+"""
+    intercluster_2rdm(v, cluster_ops, offsets; progress=true, pairs=nothing) -> G (n, n, n, n, P)
+
+With `pairs` = [(I, J), ...] the channels are the transition 2RDMs <I|p'q'sr|J> (not symmetrized; for real states
+<J|p'q'sr|I> = G_IJ[r,s,p,q]); default: the 2RDM of each root.
 
 Inter-cluster blocks of the spin-free 2RDM of each root, G[p,q,r,s,root] = <p'q'sr>, threaded over cluster
 combinations, with a progress line per combination
 """
 function intercluster_2rdm(v::TPSChem.TPSCIstate{T,N,R}, cluster_ops, offsets; progress=true,
-                           kernel=_combination_2rdm_fast!) where {T,N,R}
+                           kernel=_combination_2rdm_fast!, pairs=nothing) where {T,N,R}
+    P = pairs === nothing ? R : length(pairs)
     clusters = v.clusters
     n = sum(length(c) for c in clusters)
     combos = [[cp, cq, cs, cr] for cp in clusters, cq in clusters, cs in clusters, cr in clusters
@@ -304,13 +321,14 @@ function intercluster_2rdm(v::TPSChem.TPSCIstate{T,N,R}, cluster_ops, offsets; p
     lk, done, t0 = ReentrantLock(), Ref(0), time()
     BLAS.set_num_threads(1)   # the threads run cluster combinations
     nw = Threads.nthreads()
-    progress && @printf(" inter-cluster 2RDM: %d cluster combinations, %d roots, %d threads\n", length(combos), R, nw)
+    progress && @printf(" inter-cluster 2RDM: %d cluster combinations, %d channels, %d threads\n", length(combos), P, nw)
     tasks = map(1:nw) do _
         Threads.@spawn begin
-            Gt = zeros(T, R, n, n, n, n)   # (not G: that would capture the G of the enclosing function)
+            Gt = zeros(T, P, n, n, n, n)   # (not G: that would capture the G of the enclosing function)
             for i in queue
                 ti = time()
-                kernel(Gt, v, cluster_ops, offsets, combos[i])
+                pairs === nothing ? kernel(Gt, v, cluster_ops, offsets, combos[i]) :
+                                    kernel(Gt, v, cluster_ops, offsets, combos[i]; pairs=pairs)
                 if progress
                     lock(lk) do
                         done[] += 1
@@ -413,32 +431,40 @@ function cluster_2rdm_gram(no, na, nb, Φ::AbstractMatrix{T}, w::AbstractVector{
 end
 
 """
-    oncluster_2rdm!(G, v, cluster_bases, offsets; wmin=1e-14, progress=true)
+    oncluster_2rdm!(G, v, cluster_bases, offsets; wmin=1e-14, progress=true, pairs=nothing)
+
+With `pairs` the channels of G are pairs of roots (I, J), and the on-cluster blocks added are those of the symmetrized
+transition 2RDM (G_IJ + G_JI) / 2 (the symmetric part of the transition cluster density matrix, diagonalized into
+natural states with weights of either sign).
 
 Adds the on-cluster 2RDM blocks (all four indices on one cluster) of each root to G (n, n, n, n, R): the cluster
 density matrix rho_uv of each Fock sector, diagonalized into natural cluster states phi_k with weights w_k,
 sum_uv rho_uv <u|p'q'sr|v> = sum_k w_k <phi_k|p'q'sr|phi_k> (cluster_2rdm_gram), threaded over clusters, sectors and
 roots
 """
-function oncluster_2rdm!(G, v::TPSChem.TPSCIstate{T,N,R}, bases, offsets; wmin=1e-14, progress=true) where {T,N,R}
+function oncluster_2rdm!(G, v::TPSChem.TPSCIstate{T,N,R}, bases, offsets; wmin=1e-14, progress=true,
+                         pairs=nothing) where {T,N,R}
+    prs = pairs === nothing ? [(r, r) for r in 1:R] : pairs
+    P = length(prs)
     jobs = Tuple{Int,Tuple{Int16,Int16},Int,Matrix{T}}[]     # (cluster, sector, root, rho)
     for ci in v.clusters
         I = ci.idx
         rho = Dict{Tuple{Int16,Int16},Array{T,3}}()
         for (fock, configs) in v.data
             m = size(bases[I][fock[I]].vectors, 2)
-            ρ = get!(() -> zeros(T, m, m, R), rho, fock[I])
+            ρ = get!(() -> zeros(T, m, m, P), rho, fock[I])
             groups = Dict{Vector{Int16},Vector{Pair{Int16,MVector{R,T}}}}()
             for (config, coeff) in configs
                 key = [config[k] for k in 1:N if k != I]
                 push!(get!(groups, key, Pair{Int16,MVector{R,T}}[]), config[I] => coeff)
             end
-            for list in values(groups), (u, cu) in list, (w, cw) in list, r in 1:R
-                ρ[u, w, r] += cu[r] * cw[r]
+            for list in values(groups), (u, cu) in list, (w, cw) in list, (ch, (a, b)) in enumerate(prs)
+                ρ[u, w, ch] += cu[a] * cw[b]
             end
         end
-        for (sector, ρ) in rho, r in 1:R
-            push!(jobs, (I, sector, r, ρ[:, :, r]))
+        for (sector, ρ) in rho, ch in 1:P
+            # symmetric part: for a transition channel the on-cluster blocks of (G_IJ + G_JI) / 2
+            push!(jobs, (I, sector, ch, .5 .* (ρ[:, :, ch] .+ ρ[:, :, ch]')))
         end
     end
     # largest FCI spaces first

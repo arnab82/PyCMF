@@ -72,3 +72,53 @@ end
         @test abs(e - e0[r]) < 1e-10
     end
 end
+
+@testset "TPSCI transition RDMs, H12" begin
+    @load ARGS[1] ints clusters init_fspace d1 cluster_bases
+    clustered_ham = TPSChem.extract_ClusteredTerms(ints, clusters)
+    cluster_ops = TPSChem.compute_cluster_ops(cluster_bases, ints)
+    TPSChem.add_cmf_operators!(cluster_ops, cluster_bases, ints, d1.a, d1.b)
+    R = 3
+    ref = TPSChem.FockConfig(init_fspace)
+    v = TPSChem.TPSCIstate(clusters, ref, R=R)
+    for k in 1:R
+        v[ref][TPSChem.ClusterConfig([1, 1, k, 1, 1])] = zeros(R)
+    end
+    TPSChem.eye!(v)
+    e0, v0 = TPSChem.tpsci_ci(v, cluster_ops, clustered_ham, thresh_cipsi=1e-3, thresh_foi=1e-6, thresh_asci=-1,
+                              conv_thresh=1e-8, ci_conv=1e-10)
+    n = n_orb(ints)
+    offsets = cumsum([0; [length(c) for c in clusters[1:end-1]]])
+    pairs = [(1, 2), (1, 3), (2, 3), (2, 1)]
+    Gref = zeros(n, n, n, n, R, R)
+    TPSChem._accumulate_2rdm_intercluster_full!(Gref, v0, v0, cluster_ops, offsets)
+    G = intercluster_2rdm(v0, cluster_ops, offsets, progress=false, pairs=pairs)
+    for (ch, (I, J)) in enumerate(pairs)
+        @test maximum(abs.(G[:, :, :, :, ch] - Gref[:, :, :, :, I, J])) < 1e-12
+    end
+    TPSChem.add_spinfree_2rdm_ops!(cluster_ops, cluster_bases)
+    Gon_ref = zeros(n, n, n, n, R, R)
+    TPSChem._accumulate_2rdm_oncluster!(Gon_ref, v0, v0, cluster_ops, offsets)
+    Gon = zeros(n, n, n, n, length(pairs))
+    oncluster_2rdm!(Gon, v0, cluster_bases, offsets, progress=false, pairs=pairs)
+    nel = sum(sum(f) for f in init_fspace)
+    for (ch, (I, J)) in enumerate(pairs)
+        # symmetrized transition 2RDM (G_IJ + G_JI) / 2, with G_JI[p,q,r,s] = G_IJ[r,s,p,q] for real states
+        sym = .5 .* (Gon_ref[:, :, :, :, I, J] .+ permutedims(Gon_ref[:, :, :, :, I, J], (3, 4, 1, 2)))
+        @test maximum(abs.(Gon[:, :, :, :, ch] - sym)) < 1e-12
+        # full symmetrized transition 2RDM and 1RDM (trace); <I|H|J> = 0 between eigenstates of H in the TPSCI space
+        Gt = symmetrize_transition!(G[:, :, :, :, ch] .+ Gon[:, :, :, :, ch])
+        t1 = sum(Gt[:, q, :, q] for q in 1:n) / (nel - 1)
+        hij = sum(ints.h1 .* t1) + 0.5 * sum(ints.h2 .* permutedims(Gt, (1, 3, 2, 4)))
+        @printf(" <%d|H|%d> from transition RDMs = %.2e\n", I, J, hij)
+        @test abs(hij) < 1e-7
+        # independent checks: the same with TPSChem's on-cluster blocks, and the transition 1RDM of compute_1rdm
+        Gr = symmetrize_transition!(Gref[:, :, :, :, I, J] .+ Gon_ref[:, :, :, :, I, J])
+        t1r = sum(Gr[:, q, :, q] for q in 1:n) / (nel - 1)
+        hr = sum(ints.h1 .* t1r) + 0.5 * sum(ints.h2 .* permutedims(Gr, (1, 3, 2, 4)))
+        γa, γb = TPSChem.compute_1rdm(v0, cluster_ops)
+        γ = γa[:, :, I, J] .+ γb[:, :, I, J]
+        γs = .5 .* (γ .+ γ')
+        @test maximum(abs.(t1 - γs)) < 1e-10
+    end
+end
