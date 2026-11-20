@@ -29,4 +29,4 @@ def test_superexchange():
     dn, D, Hd2, w = diabatize(W, names, Hd)
     c = sf_couplings(dn, Hd2)[0]
     assert abs(abs(c['direct']) - 0.01) < 1e-12
-    assert abs(abs(c['mediated']) - 0.10 * 0.05 * .5 * (1 / (0 - .5) + 1 / (-.1 - .5))) < 1e-12
+    assert abs(abs(c['mediated']) - abs(0.10 * 0.05 * .5 * (1 / (0 - .5) + 1 / (-.1 - .5)))) < 1e-12
