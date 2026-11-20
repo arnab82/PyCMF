@@ -11,7 +11,7 @@ V_eff = sum_CT V(LE, CT) V(CT, TT) * 1/2 [1/(E_LE - E_CT) + 1/(E_TT - E_CT)].
 import numpy as np
 
 
-def diabatize(W, names, H, exclude=('other',), nstates=None):
+def diabatize(W, names, H, exclude=('other',), nstates=None, min_weight=0.3):
     """
     Parameters
     ----------
@@ -20,6 +20,8 @@ def diabatize(W, names, H, exclude=('other',), nstates=None):
     H : (n, n) Hamiltonian of the model states (diag(E) for eigenstates, or the L-PDFT Hamiltonian)
     exclude : classes not used as diabats
     nstates : number of diabats (default n): the classes with the largest top weights
+    min_weight : classes whose largest weight in the model space is smaller are not used (e.g. local triplets in a
+        space of singlets)
 
     Returns
     -------
@@ -37,7 +39,8 @@ def diabatize(W, names, H, exclude=('other',), nstates=None):
         w, v = np.linalg.eigh(W[:, :, k])
         x = v[:, -1]
         x = x * np.sign(x[np.argmax(abs(x))])
-        cand.append((w[-1], name, x))
+        if w[-1] >= min_weight:
+            cand.append((w[-1], name, x))
     cand.sort(key=lambda t: -t[0])
     cand = cand[:m]
     dnames = [c[1] for c in cand]
