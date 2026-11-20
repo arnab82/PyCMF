@@ -38,7 +38,6 @@ Long-axis slip 1.2 A only: couplings vanish by symmetry. Long 1.2 + short 0.8 A:
 | TPSCI | 4.31 | 4.54 | 3.66 | 0.15 | -13.2 |
 | L-PDFT tPBE | 1.67 | 1.41 | 2.75 | -0.10 | 2.9 |
 | L-PDFT tPBE0 | 2.33 | 2.19 | 2.98 | -0.04 | 8.8 |
-
 | NEVPT2-dressed | 2.59 | 2.84 | 2.98 | (10.1) | (-0.5) |
 
 Experiment (tetracene): S1 ~2.3-2.4 eV, 2 T1 ~2.5 eV, CT above S1.
